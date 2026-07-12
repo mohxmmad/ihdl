@@ -1,0 +1,8 @@
+MODULE InvertAnd
+
+IMPORT NotGate
+
+INPUT IN
+OUTPUT OUT
+
+NotGate N1 IN OUT

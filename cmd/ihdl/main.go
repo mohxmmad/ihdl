@@ -2,28 +2,35 @@ package main
 
 import (
 	"flag"
-	"fmt"
-	"os"
+	"log"
+
+	"github.com/mohxmmad/ihdl/internal"
 )
 
 func main() {
-	input := flag.String("i", "", "Input iHDL file")
+	input := flag.String("i", "", "entry .ihdl file")
+	inputFile := flag.String("iinp", "", "input values file")
+	outputFile := flag.String("iout", "", "output values file")
 	flag.Parse()
 
 	if *input == "" {
-		fmt.Println("Usage: ihdl -i <file.ihdl>")
-		os.Exit(1)
+		log.Fatal("usage: ihdl -i file.ihdl")
+	}
+	if (*inputFile == "") != (*outputFile == "") {
+		log.Fatal("both -iinp and -iout must be provided together")
 	}
 
-	fmt.Println("Loading:", *input)
-
-	data, err := os.ReadFile(*input)
+	project, err := internal.ParseProject(*input)
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
 
-	fmt.Println("\n========== SOURCE ==========")
-	fmt.Println(string(data))
-	fmt.Println("============================")
+	if *inputFile != "" {
+		err = internal.SimulateFromFiles(project, *inputFile, *outputFile)
+	} else {
+		err = internal.Simulate(project)
+	}
+	if err != nil {
+		log.Fatal(err)
+	}
 }

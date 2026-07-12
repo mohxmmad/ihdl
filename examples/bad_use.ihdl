@@ -1,0 +1,8 @@
+MODULE BadUse
+
+IMPORT NotGate
+
+INPUT IN
+OUTPUT OUT
+
+NotGate N1
