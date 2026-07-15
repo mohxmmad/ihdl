@@ -76,6 +76,7 @@ func loadCircuit(path string, registry map[string]*Circuit, loading map[string]b
 		Signals: make(map[string]Port),
 	}
 	importedModules := make(map[string]bool)
+	displayIndex := make(map[string]int)
 
 	lines := strings.Split(string(data), "\n")
 	for lineNo, raw := range lines {
@@ -115,6 +116,9 @@ func loadCircuit(path string, registry map[string]*Circuit, loading map[string]b
 			if err != nil {
 				return nil, fmt.Errorf("%s:%d: %w", cleanPath, lineNo+1, err)
 			}
+			if _, ok := displayIndex[port.Name]; ok {
+				return nil, fmt.Errorf("%s:%d: signal %s conflicts with display name", cleanPath, lineNo+1, port.Name)
+			}
 			if err := registerSignal(circuit.Signals, port); err != nil {
 				return nil, fmt.Errorf("%s:%d: %w", cleanPath, lineNo+1, err)
 			}
@@ -128,6 +132,46 @@ func loadCircuit(path string, registry map[string]*Circuit, loading map[string]b
 			case "wire":
 				circuit.Wires = append(circuit.Wires, port)
 			}
+
+		case "DISPLAY":
+			if len(fields) != 4 {
+				return nil, fmt.Errorf("%s:%d: invalid DISPLAY", cleanPath, lineNo+1)
+			}
+			display, err := parseDisplay(fields[1], fields[2], fields[3])
+			if err != nil {
+				return nil, fmt.Errorf("%s:%d: %w", cleanPath, lineNo+1, err)
+			}
+			if _, ok := circuit.Signals[display.Name]; ok {
+				return nil, fmt.Errorf("%s:%d: display %s conflicts with signal name", cleanPath, lineNo+1, display.Name)
+			}
+			if _, ok := displayIndex[display.Name]; ok {
+				return nil, fmt.Errorf("%s:%d: duplicate display %s", cleanPath, lineNo+1, display.Name)
+			}
+			displayIndex[display.Name] = len(circuit.Displays)
+			circuit.Displays = append(circuit.Displays, display)
+
+		case "PIXEL":
+			if len(fields) != 5 {
+				return nil, fmt.Errorf("%s:%d: invalid PIXEL", cleanPath, lineNo+1)
+			}
+			displayPos, ok := displayIndex[fields[1]]
+			if !ok {
+				return nil, fmt.Errorf("%s:%d: unknown display %s", cleanPath, lineNo+1, fields[1])
+			}
+			pixel, err := parseDisplayPixel(fields[2], fields[3], fields[4])
+			if err != nil {
+				return nil, fmt.Errorf("%s:%d: %w", cleanPath, lineNo+1, err)
+			}
+			display := &circuit.Displays[displayPos]
+			if pixel.X >= display.Width || pixel.Y >= display.Height {
+				return nil, fmt.Errorf("%s:%d: pixel (%d,%d) is outside display %s bounds %dx%d", cleanPath, lineNo+1, pixel.X, pixel.Y, display.Name, display.Width, display.Height)
+			}
+			for _, existing := range display.Pixels {
+				if existing.X == pixel.X && existing.Y == pixel.Y {
+					return nil, fmt.Errorf("%s:%d: duplicate pixel mapping for %s at (%d,%d)", cleanPath, lineNo+1, display.Name, pixel.X, pixel.Y)
+				}
+			}
+			display.Pixels = append(display.Pixels, pixel)
 
 		case "HIGH", "LOW":
 			if len(fields) != 2 {
@@ -156,6 +200,18 @@ func loadCircuit(path string, registry map[string]*Circuit, loading map[string]b
 				return nil, fmt.Errorf("%s:%d: invalid %s", cleanPath, lineNo+1, fields[0])
 			}
 			circuit.Ops = append(circuit.Ops, Operation{Kind: fields[0], Name: fields[1], Inputs: []string{fields[2]}, Outputs: []string{fields[3]}})
+
+		case "DFF", "TFF":
+			if len(fields) != 5 {
+				return nil, fmt.Errorf("%s:%d: invalid %s", cleanPath, lineNo+1, fields[0])
+			}
+			circuit.Ops = append(circuit.Ops, Operation{Kind: fields[0], Name: fields[1], Inputs: []string{fields[2], fields[3]}, Outputs: []string{fields[4]}})
+
+		case "SRFF", "JKFF":
+			if len(fields) != 6 {
+				return nil, fmt.Errorf("%s:%d: invalid %s", cleanPath, lineNo+1, fields[0])
+			}
+			circuit.Ops = append(circuit.Ops, Operation{Kind: fields[0], Name: fields[1], Inputs: []string{fields[2], fields[3], fields[4]}, Outputs: []string{fields[5]}})
 
 		case "SPLIT":
 			if len(fields) < 3 {
@@ -340,6 +396,36 @@ func parseNamedPort(token string, kind SignalKind) (Port, error) {
 		return Port{}, fmt.Errorf("invalid signal %q", token)
 	}
 	return Port{Name: token, Kind: kind, Width: 0}, nil
+}
+
+func parseDisplay(name, widthText, heightText string) (Display, error) {
+	if name == "" || strings.Contains(name, "[") || strings.Contains(name, "]") {
+		return Display{}, fmt.Errorf("invalid display %q", name)
+	}
+	width, err := strconv.Atoi(widthText)
+	if err != nil || width < 1 {
+		return Display{}, fmt.Errorf("invalid display width %q", widthText)
+	}
+	height, err := strconv.Atoi(heightText)
+	if err != nil || height < 1 {
+		return Display{}, fmt.Errorf("invalid display height %q", heightText)
+	}
+	return Display{Name: name, Width: width, Height: height}, nil
+}
+
+func parseDisplayPixel(xText, yText, signal string) (DisplayPixel, error) {
+	x, err := strconv.Atoi(xText)
+	if err != nil || x < 0 {
+		return DisplayPixel{}, fmt.Errorf("invalid pixel x coordinate %q", xText)
+	}
+	y, err := strconv.Atoi(yText)
+	if err != nil || y < 0 {
+		return DisplayPixel{}, fmt.Errorf("invalid pixel y coordinate %q", yText)
+	}
+	if signal == "" {
+		return DisplayPixel{}, fmt.Errorf("pixel signal cannot be empty")
+	}
+	return DisplayPixel{X: x, Y: y, Signal: signal}, nil
 }
 
 func parseSignalRef(token string, known map[string]Port) (Port, error) {

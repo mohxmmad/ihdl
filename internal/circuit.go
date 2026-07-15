@@ -20,6 +20,27 @@ type Value struct {
 	Channels []uint8
 }
 
+type DisplayPixel struct {
+	X      int
+	Y      int
+	Signal string
+}
+
+type Display struct {
+	Name   string
+	Width  int
+	Height int
+	Pixels []DisplayPixel
+}
+
+type DisplayFrame struct {
+	Name   string
+	Scope  string
+	Width  int
+	Height int
+	Pixels []uint8
+}
+
 type Operation struct {
 	Kind    string
 	Name    string
@@ -30,18 +51,22 @@ type Operation struct {
 }
 
 type Circuit struct {
-	Name    string
-	Path    string
-	Inputs  []Port
-	Clocks  []Port
-	Outputs []Port
-	Wires   []Port
-	Ops     []Operation
-	Imports []string
-	Signals map[string]Port
+	Name     string
+	Path     string
+	Inputs   []Port
+	Clocks   []Port
+	Outputs  []Port
+	Wires    []Port
+	Displays []Display
+	Ops      []Operation
+	Imports  []string
+	Signals  map[string]Port
 }
 
 type Project struct {
 	Entry    *Circuit
 	Circuits map[string]*Circuit
+	State    map[string]Value
+	Clocks   map[string]bool
+	Frames   map[string]DisplayFrame
 }

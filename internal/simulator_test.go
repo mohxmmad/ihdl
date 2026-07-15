@@ -183,6 +183,119 @@ func TestClockIsAcceptedInEvaluationAndFiles(t *testing.T) {
 	}
 }
 
+func TestDFFCapturesOnRisingEdge(t *testing.T) {
+	project, err := ParseProject(filepath.Join("..", "examples", "dff.ihdl"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	steps := []struct {
+		name string
+		in   map[string]Value
+		want string
+	}{
+		{
+			name: "initial low clock holds reset state",
+			in: map[string]Value{
+				"D":   {Kind: SignalBits, Bits: []bool{false}},
+				"CLK": {Kind: SignalBits, Bits: []bool{false}},
+			},
+			want: "0",
+		},
+		{
+			name: "data change without edge does not latch",
+			in: map[string]Value{
+				"D":   {Kind: SignalBits, Bits: []bool{true}},
+				"CLK": {Kind: SignalBits, Bits: []bool{false}},
+			},
+			want: "0",
+		},
+		{
+			name: "rising edge captures one",
+			in: map[string]Value{
+				"D":   {Kind: SignalBits, Bits: []bool{true}},
+				"CLK": {Kind: SignalBits, Bits: []bool{true}},
+			},
+			want: "1",
+		},
+		{
+			name: "high clock level alone does not recapture",
+			in: map[string]Value{
+				"D":   {Kind: SignalBits, Bits: []bool{false}},
+				"CLK": {Kind: SignalBits, Bits: []bool{true}},
+			},
+			want: "1",
+		},
+		{
+			name: "falling edge holds state",
+			in: map[string]Value{
+				"D":   {Kind: SignalBits, Bits: []bool{false}},
+				"CLK": {Kind: SignalBits, Bits: []bool{false}},
+			},
+			want: "1",
+		},
+		{
+			name: "next rising edge captures zero",
+			in: map[string]Value{
+				"D":   {Kind: SignalBits, Bits: []bool{false}},
+				"CLK": {Kind: SignalBits, Bits: []bool{true}},
+			},
+			want: "0",
+		},
+	}
+
+	for _, step := range steps {
+		outputs, err := Evaluate(project, project.Entry, step.in)
+		if err != nil {
+			t.Fatalf("%s: evaluate: %v", step.name, err)
+		}
+		if got := formatValue(outputs["Q"]); got != step.want {
+			t.Fatalf("%s: expected Q=%s, got %s", step.name, step.want, got)
+		}
+	}
+}
+
+func TestDFFStateIsScopedPerInstance(t *testing.T) {
+	child := &Circuit{
+		Name:    "BitCell",
+		Inputs:  []Port{{Name: "D", Kind: SignalBits, Width: 1}},
+		Clocks:  []Port{{Name: "CLK", Kind: SignalBits, Width: 1}},
+		Outputs: []Port{{Name: "Q", Kind: SignalBits, Width: 1}},
+		Signals: map[string]Port{"D": {Name: "D", Kind: SignalBits, Width: 1}, "CLK": {Name: "CLK", Kind: SignalBits, Width: 1}, "Q": {Name: "Q", Kind: SignalBits, Width: 1}},
+		Ops:     []Operation{{Kind: "DFF", Name: "FF1", Inputs: []string{"D", "CLK"}, Outputs: []string{"Q"}}},
+	}
+	parent := &Circuit{
+		Name:    "Top",
+		Inputs:  []Port{{Name: "A", Kind: SignalBits, Width: 1}, {Name: "B", Kind: SignalBits, Width: 1}},
+		Clocks:  []Port{{Name: "CLK", Kind: SignalBits, Width: 1}},
+		Outputs: []Port{{Name: "QA", Kind: SignalBits, Width: 1}, {Name: "QB", Kind: SignalBits, Width: 1}},
+		Signals: map[string]Port{"A": {Name: "A", Kind: SignalBits, Width: 1}, "B": {Name: "B", Kind: SignalBits, Width: 1}, "CLK": {Name: "CLK", Kind: SignalBits, Width: 1}, "QA": {Name: "QA", Kind: SignalBits, Width: 1}, "QB": {Name: "QB", Kind: SignalBits, Width: 1}},
+		Ops: []Operation{
+			{Kind: "USE", Name: "LEFT", Module: "BitCell", Signals: []string{"A", "CLK", "QA"}},
+			{Kind: "USE", Name: "RIGHT", Module: "BitCell", Signals: []string{"B", "CLK", "QB"}},
+		},
+	}
+	project := &Project{Entry: parent, Circuits: map[string]*Circuit{"Top": parent, "BitCell": child}}
+
+	outputs, err := Evaluate(project, parent, map[string]Value{
+		"A":   {Kind: SignalBits, Bits: []bool{true}},
+		"B":   {Kind: SignalBits, Bits: []bool{false}},
+		"CLK": {Kind: SignalBits, Bits: []bool{true}},
+	})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if got := formatValue(outputs["QA"]); got != "1" {
+		t.Fatalf("expected QA=1, got %s", got)
+	}
+	if got := formatValue(outputs["QB"]); got != "0" {
+		t.Fatalf("expected QB=0, got %s", got)
+	}
+	if len(project.State) != 2 {
+		t.Fatalf("expected isolated state per instance, got %d state entries", len(project.State))
+	}
+}
+
 func TestRGBAndBWPixels(t *testing.T) {
 	project, err := ParseProject(filepath.Join("..", "examples", "rgb_passthrough.ihdl"))
 	if err != nil {
@@ -290,5 +403,84 @@ func TestRGBAcceptsBinaryChannelInput(t *testing.T) {
 	}
 	if string(data) != "PX_OUT 255,0,170\nBW_OUT 0\n" {
 		t.Fatalf("unexpected output file: %q", string(data))
+	}
+}
+
+func TestDisplayRendersRGBAndBWSignals(t *testing.T) {
+	project, err := ParseProject(filepath.Join("..", "examples", "display_rgb.ihdl"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	_, err = Evaluate(project, project.Entry, map[string]Value{
+		"P0": {Kind: SignalRGB, Channels: []uint8{10, 20, 30}},
+		"P1": {Kind: SignalBW, Channels: []uint8{200}},
+	})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	frame, ok := project.Frames["DisplayRGB.SCREEN"]
+	if !ok {
+		t.Fatalf("expected display frame to be rendered")
+	}
+	if frame.Width != 2 || frame.Height != 1 {
+		t.Fatalf("unexpected frame size: %dx%d", frame.Width, frame.Height)
+	}
+	if got := frame.Pixels[:6]; got[0] != 10 || got[1] != 20 || got[2] != 30 || got[3] != 200 || got[4] != 200 || got[5] != 200 {
+		t.Fatalf("unexpected frame pixels: %v", got)
+	}
+}
+
+func TestDisplayDefaultsUndrivenPixelsToBlack(t *testing.T) {
+	project := &Project{
+		Circuits: map[string]*Circuit{},
+		Entry: &Circuit{
+			Name:    "Top",
+			Inputs:  []Port{{Name: "PX", Kind: SignalRGB, Width: 0}},
+			Outputs: []Port{{Name: "PX_OUT", Kind: SignalRGB, Width: 0}},
+			Signals: map[string]Port{"PX": {Name: "PX", Kind: SignalRGB}, "PX_OUT": {Name: "PX_OUT", Kind: SignalRGB}},
+			Displays: []Display{{
+				Name:   "SCREEN",
+				Width:  2,
+				Height: 1,
+				Pixels: []DisplayPixel{{X: 0, Y: 0, Signal: "PX_OUT"}, {X: 1, Y: 0, Signal: "MISSING"}},
+			}},
+			Ops: []Operation{{Kind: "BUF", Name: "B1", Inputs: []string{"PX"}, Outputs: []string{"PX_OUT"}}},
+		},
+	}
+
+	_, err := Evaluate(project, project.Entry, map[string]Value{"PX": {Kind: SignalRGB, Channels: []uint8{1, 2, 3}}})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	frame := project.Frames["Top.SCREEN"]
+	if got := frame.Pixels[3:6]; got[0] != 0 || got[1] != 0 || got[2] != 0 {
+		t.Fatalf("expected undriven pixel to stay black, got %v", got)
+	}
+}
+
+func TestWriteDisplayFilesExportsIPPF(t *testing.T) {
+	project, err := ParseProject(filepath.Join("..", "examples", "display_rgb.ihdl"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	_, err = Evaluate(project, project.Entry, map[string]Value{
+		"P0": {Kind: SignalRGB, Channels: []uint8{255, 0, 0}},
+		"P1": {Kind: SignalBW, Channels: []uint8{0}},
+	})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "screen.ippf")
+	if err := WriteDisplayFiles(project, path); err != nil {
+		t.Fatalf("write display: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read display: %v", err)
+	}
+	pngHeader := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
+	if len(data) < len(pngHeader) || string(data[:len(pngHeader)]) != string(pngHeader) {
+		t.Fatalf("expected ippf export to contain png data")
 	}
 }

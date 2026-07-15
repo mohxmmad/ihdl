@@ -11,7 +11,12 @@ import (
 )
 
 func Simulate(project *Project) error {
+	return SimulateWithOptions(project, SimulationOptions{})
+}
+
+func SimulateWithOptions(project *Project, options SimulationOptions) error {
 	reader := bufio.NewReader(os.Stdin)
+	var viewer *displayViewer
 
 	for {
 		inputs := make(map[string]Value, len(allSourcePorts(project.Entry)))
@@ -26,6 +31,25 @@ func Simulate(project *Project) error {
 		outputs, err := Evaluate(project, project.Entry, inputs)
 		if err != nil {
 			return err
+		}
+		frames := listDisplayFrames(project)
+		if len(frames) > 0 {
+			if viewer == nil {
+				viewer, err = newDisplayViewer()
+				if err == nil {
+					fmt.Printf("\nDisplay viewer: %s\n", viewer.URL())
+				}
+			}
+			if viewer != nil {
+				if err := viewer.Update(frames); err != nil {
+					return err
+				}
+			}
+			if options.DisplayExportPath != "" {
+				if err := WriteDisplayFiles(project, options.DisplayExportPath); err != nil {
+					return err
+				}
+			}
 		}
 
 		fmt.Println()
@@ -46,6 +70,10 @@ func Simulate(project *Project) error {
 }
 
 func SimulateFromFiles(project *Project, inputPath, outputPath string) error {
+	return SimulateFromFilesWithOptions(project, inputPath, outputPath, SimulationOptions{})
+}
+
+func SimulateFromFilesWithOptions(project *Project, inputPath, outputPath string, options SimulationOptions) error {
 	inputs, err := ReadInputFile(project.Entry, inputPath)
 	if err != nil {
 		return err
@@ -55,11 +83,22 @@ func SimulateFromFiles(project *Project, inputPath, outputPath string) error {
 	if err != nil {
 		return err
 	}
+	if options.DisplayExportPath != "" {
+		if err := WriteDisplayFiles(project, options.DisplayExportPath); err != nil {
+			return err
+		}
+	}
 
 	return WriteOutputFile(project.Entry, outputPath, outputs)
 }
 
 func Evaluate(project *Project, circuit *Circuit, inputs map[string]Value) (map[string]Value, error) {
+	return evaluate(project, circuit, inputs, circuit.Name)
+}
+
+func evaluate(project *Project, circuit *Circuit, inputs map[string]Value, scope string) (map[string]Value, error) {
+	ensureProjectState(project)
+
 	env := make(map[string]Value)
 	for _, in := range allSourcePorts(circuit) {
 		value, ok := inputs[in.Name]
@@ -83,7 +122,7 @@ func Evaluate(project *Project, circuit *Circuit, inputs map[string]Value) (map[
 		next := make([]Operation, 0, len(pending))
 
 		for _, op := range pending {
-			applied, err := applyOperation(op, env, circuit, modulesByName, project)
+			applied, err := applyOperation(op, env, circuit, modulesByName, project, scope)
 			if err != nil {
 				return nil, err
 			}
@@ -101,6 +140,9 @@ func Evaluate(project *Project, circuit *Circuit, inputs map[string]Value) (map[
 	}
 
 	outputs := make(map[string]Value, len(circuit.Outputs))
+	if err := renderDisplays(project, circuit, env, scope); err != nil {
+		return nil, err
+	}
 	for _, out := range circuit.Outputs {
 		value, ok := env[out.Name]
 		if !ok {
@@ -115,7 +157,7 @@ func Evaluate(project *Project, circuit *Circuit, inputs map[string]Value) (map[
 	return outputs, nil
 }
 
-func applyOperation(op Operation, env map[string]Value, circuit *Circuit, modules map[string]*Circuit, project *Project) (bool, error) {
+func applyOperation(op Operation, env map[string]Value, circuit *Circuit, modules map[string]*Circuit, project *Project, scope string) (bool, error) {
 	switch op.Kind {
 	case "HIGH", "LOW":
 		port, err := signalPort(circuit, op.Outputs[0])
@@ -194,6 +236,90 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 		}
 		return true, nil
 
+	case "DFF":
+		data, ok := env[op.Inputs[0]]
+		if !ok {
+			return false, nil
+		}
+		clock, ok := env[op.Inputs[1]]
+		if !ok {
+			return false, nil
+		}
+		value, err := applyDFF(project, scope, op, circuit, data, clock)
+		if err != nil {
+			return false, err
+		}
+		env[op.Outputs[0]] = value
+		if err := inferSignalPort(circuit, op.Outputs[0], value); err != nil {
+			return false, err
+		}
+		return true, nil
+
+	case "TFF":
+		toggle, ok := env[op.Inputs[0]]
+		if !ok {
+			return false, nil
+		}
+		clock, ok := env[op.Inputs[1]]
+		if !ok {
+			return false, nil
+		}
+		value, err := applyTFF(project, scope, op, circuit, toggle, clock)
+		if err != nil {
+			return false, err
+		}
+		env[op.Outputs[0]] = value
+		if err := inferSignalPort(circuit, op.Outputs[0], value); err != nil {
+			return false, err
+		}
+		return true, nil
+
+	case "SRFF":
+		set, ok := env[op.Inputs[0]]
+		if !ok {
+			return false, nil
+		}
+		reset, ok := env[op.Inputs[1]]
+		if !ok {
+			return false, nil
+		}
+		clock, ok := env[op.Inputs[2]]
+		if !ok {
+			return false, nil
+		}
+		value, err := applySRFF(project, scope, op, circuit, set, reset, clock)
+		if err != nil {
+			return false, err
+		}
+		env[op.Outputs[0]] = value
+		if err := inferSignalPort(circuit, op.Outputs[0], value); err != nil {
+			return false, err
+		}
+		return true, nil
+
+	case "JKFF":
+		j, ok := env[op.Inputs[0]]
+		if !ok {
+			return false, nil
+		}
+		k, ok := env[op.Inputs[1]]
+		if !ok {
+			return false, nil
+		}
+		clock, ok := env[op.Inputs[2]]
+		if !ok {
+			return false, nil
+		}
+		value, err := applyJKFF(project, scope, op, circuit, j, k, clock)
+		if err != nil {
+			return false, err
+		}
+		env[op.Outputs[0]] = value
+		if err := inferSignalPort(circuit, op.Outputs[0], value); err != nil {
+			return false, err
+		}
+		return true, nil
+
 	case "SPLIT":
 		source, ok := env[op.Inputs[0]]
 		if !ok {
@@ -251,7 +377,7 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 			}
 			childInputs[in.Name] = cloneValue(value)
 		}
-		childOutputs, err := Evaluate(project, child, childInputs)
+		childOutputs, err := evaluate(project, child, childInputs, childScope(scope, op))
 		if err != nil {
 			return false, err
 		}
@@ -267,6 +393,142 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 	}
 
 	return false, fmt.Errorf("unknown operation %s in module %s", op.Kind, circuit.Name)
+}
+
+func ensureProjectState(project *Project) {
+	if project.State == nil {
+		project.State = make(map[string]Value)
+	}
+	if project.Clocks == nil {
+		project.Clocks = make(map[string]bool)
+	}
+}
+
+func applyDFF(project *Project, scope string, op Operation, circuit *Circuit, data, clock Value) (Value, error) {
+	if data.Kind != SignalBits {
+		return Value{}, fmt.Errorf("flip-flop %s in module %s only supports bit signals", op.Name, circuit.Name)
+	}
+	rising, err := sequentialClockEdge(project, scope, op, circuit, clock)
+	if err != nil {
+		return Value{}, err
+	}
+	key := sequentialStateKey(scope, op)
+	state := loadStoredBits(project, key, len(data.Bits))
+	if rising {
+		state = cloneValue(data)
+		project.State[key] = cloneValue(state)
+	}
+	return cloneValue(state), nil
+}
+
+func applyTFF(project *Project, scope string, op Operation, circuit *Circuit, toggle, clock Value) (Value, error) {
+	if err := ensureSingleBitValue(toggle, op.Name, circuit.Name); err != nil {
+		return Value{}, err
+	}
+	rising, err := sequentialClockEdge(project, scope, op, circuit, clock)
+	if err != nil {
+		return Value{}, err
+	}
+	key := sequentialStateKey(scope, op)
+	state := loadStoredBits(project, key, 1)
+	if rising && toggle.Bits[0] {
+		state.Bits[0] = !state.Bits[0]
+		project.State[key] = cloneValue(state)
+	}
+	return cloneValue(state), nil
+}
+
+func applySRFF(project *Project, scope string, op Operation, circuit *Circuit, set, reset, clock Value) (Value, error) {
+	if err := ensureSingleBitValue(set, op.Name, circuit.Name); err != nil {
+		return Value{}, err
+	}
+	if err := ensureSingleBitValue(reset, op.Name, circuit.Name); err != nil {
+		return Value{}, err
+	}
+	rising, err := sequentialClockEdge(project, scope, op, circuit, clock)
+	if err != nil {
+		return Value{}, err
+	}
+	key := sequentialStateKey(scope, op)
+	state := loadStoredBits(project, key, 1)
+	if rising {
+		switch {
+		case set.Bits[0] && reset.Bits[0]:
+			return Value{}, fmt.Errorf("flip-flop %s in module %s has invalid SR state with S=1 and R=1", op.Name, circuit.Name)
+		case set.Bits[0]:
+			state.Bits[0] = true
+		case reset.Bits[0]:
+			state.Bits[0] = false
+		}
+		project.State[key] = cloneValue(state)
+	}
+	return cloneValue(state), nil
+}
+
+func applyJKFF(project *Project, scope string, op Operation, circuit *Circuit, j, k, clock Value) (Value, error) {
+	if err := ensureSingleBitValue(j, op.Name, circuit.Name); err != nil {
+		return Value{}, err
+	}
+	if err := ensureSingleBitValue(k, op.Name, circuit.Name); err != nil {
+		return Value{}, err
+	}
+	rising, err := sequentialClockEdge(project, scope, op, circuit, clock)
+	if err != nil {
+		return Value{}, err
+	}
+	key := sequentialStateKey(scope, op)
+	state := loadStoredBits(project, key, 1)
+	if rising {
+		switch {
+		case j.Bits[0] && k.Bits[0]:
+			state.Bits[0] = !state.Bits[0]
+		case j.Bits[0]:
+			state.Bits[0] = true
+		case k.Bits[0]:
+			state.Bits[0] = false
+		}
+		project.State[key] = cloneValue(state)
+	}
+	return cloneValue(state), nil
+}
+
+func sequentialClockEdge(project *Project, scope string, op Operation, circuit *Circuit, clock Value) (bool, error) {
+	if err := ensureSingleBitValue(clock, op.Name, circuit.Name); err != nil {
+		return false, err
+	}
+	key := sequentialClockKey(scope, op)
+	current := clock.Bits[0]
+	previous := project.Clocks[key]
+	project.Clocks[key] = current
+	return !previous && current, nil
+}
+
+func ensureSingleBitValue(value Value, opName, moduleName string) error {
+	if value.Kind != SignalBits || len(value.Bits) != 1 {
+		return fmt.Errorf("flip-flop %s in module %s requires 1-bit control signals", opName, moduleName)
+	}
+	return nil
+}
+
+func loadStoredBits(project *Project, key string, width int) Value {
+	if state, ok := project.State[key]; ok && state.Kind == SignalBits && len(state.Bits) == width {
+		return cloneValue(state)
+	}
+	state := Value{Kind: SignalBits, Bits: make([]bool, width)}
+	project.State[key] = cloneValue(state)
+	return state
+}
+
+func sequentialStateKey(scope string, op Operation) string {
+	return scope + ".state." + op.Name
+}
+
+func sequentialClockKey(scope string, op Operation) string {
+	return scope + ".clock." + op.Name
+}
+
+func childScope(scope string, op Operation) string {
+	return scope + "." + op.Name
 }
 
 func unresolvedError(circuit *Circuit, pending []Operation, env map[string]Value) error {

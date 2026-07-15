@@ -1,6 +1,6 @@
 # iHDL
 
-`iHDL` is a small HDL-like language for describing and simulating combinational logic modules in Go.
+`iHDL` is a small HDL-like language for describing and simulating logic modules in Go.
 
 Current features:
 
@@ -15,9 +15,11 @@ Current features:
 - explicit module instantiation
 - internal wires
 - clocks as source ports
+- rising-edge flip-flops: `DFF`, `TFF`, `SRFF`, `JKFF`
 - interactive simulation
 - file-based simulation with `.iinp` and `.iout`
 - typed pixels: RGB and grayscale/BW
+- display windows with `.ippf` export
 
 ## 1. File Structure
 
@@ -73,7 +75,26 @@ Rules:
 - `BW` values are `0..255`
 - `BW` input can also be provided as 8-bit binary like `10101010`
 
-## 4. Clock
+## 4. Display
+
+Displays render pixel signals into a separate viewer window during interactive simulation.
+
+```ihdl
+DISPLAY SCREEN 2 1
+PIXEL SCREEN 0 0 PX
+PIXEL SCREEN 1 0 LEVEL
+```
+
+Rules:
+
+- `DISPLAY Name Width Height` declares a screen
+- `PIXEL Display X Y Signal` maps one `RGB` or `BW` signal to one pixel
+- `BW` pixels are shown as grayscale
+- if a mapped signal has no value, that pixel stays black
+- unmapped pixels also stay black
+- display names must be declared before their `PIXEL` mappings
+
+## 5. Clock
 
 Clock is declared separately:
 
@@ -84,10 +105,11 @@ CLOCK CLK
 Rules:
 
 - clock must be 1 bit
-- clock behaves like an input source right now
-- clock is reserved for future sequential logic
+- clock is read as a source signal during simulation
+- sequential elements trigger on the rising edge (`0 -> 1`)
+- flip-flops start at `0` unless set by an earlier clock edge in the same simulation session
 
-## 5. Gates
+## 6. Gates
 
 ### AND
 
@@ -129,7 +151,7 @@ Notes:
 - both `OR` inputs must have the same width
 - `NOT` preserves width
 
-## 6. Constants
+## 7. Constants
 
 ```ihdl
 HIGH VCC
@@ -149,7 +171,48 @@ Rules:
 - `LOW` fills every bit with `0`
 - constants only work on bit signals and buses
 
-## 7. Splitter
+## 8. Flip-Flops
+
+All flip-flops are rising-edge triggered and keep their state across repeated evaluations in the same simulator session.
+
+### DFF
+
+```ihdl
+DFF FF1 D CLK Q
+```
+
+- `D` and `Q` can be 1-bit signals or bit buses
+- `CLK` must be 1 bit
+
+### TFF
+
+```ihdl
+TFF FF1 T CLK Q
+```
+
+- `T`, `CLK`, and `Q` must be 1 bit
+- on a rising edge, `Q` toggles only when `T = 1`
+
+### SRFF
+
+```ihdl
+SRFF FF1 S R CLK Q
+```
+
+- `S`, `R`, `CLK`, and `Q` must be 1 bit
+- on a rising edge: `10` sets, `01` resets, `00` holds
+- `11` is treated as an invalid state
+
+### JKFF
+
+```ihdl
+JKFF FF1 J K CLK Q
+```
+
+- `J`, `K`, `CLK`, and `Q` must be 1 bit
+- on a rising edge: `10` sets, `01` resets, `00` holds, `11` toggles
+
+## 9. Splitter
 
 Use `SPLIT` to split a bit bus into 1-bit outputs.
 
@@ -168,7 +231,7 @@ Rules:
 - number of outputs must match bus width
 - each split output is 1 bit
 
-## 8. Join
+## 10. Join
 
 Use `JOIN` to combine 1-bit signals into a bus.
 
@@ -188,7 +251,7 @@ Rules:
 - output width must match the number of joined inputs
 - input order becomes bus bit order
 
-## 9. Modules
+## 11. Modules
 
 ### Define a module
 
@@ -243,7 +306,7 @@ Instantiate it like:
 Child U1 A CLK OUT
 ```
 
-## 10. Internal Wires
+## 12. Internal Wires
 
 Use `WIRE`, `WIRE_RGB`, or `WIRE_BW` for temporary values.
 
@@ -264,15 +327,33 @@ AndGate A1 A B TEMP1
 AndGate A2 TEMP1 C OUT
 ```
 
-## 11. Running the Simulator
+## 13. Running the Simulator
+
+### Build the binary
+
+Linux:
+
+```bash
+go build -o ihdl ./cmd/ihdl
+./ihdl examples/and.ihdl
+```
+
+Windows PowerShell:
+
+```powershell
+go build -o ihdl.exe .\cmd\ihdl
+.\ihdl.exe .\examples\and.ihdl
+```
 
 ### Interactive mode
 
 ```bash
-go run ./cmd/ihdl -i examples/and.ihdl
+go run ./cmd/ihdl examples/and.ihdl
 ```
 
 The simulator asks for values based on the module's declared inputs and clocks.
+
+If the module declares a `DISPLAY`, iHDL also starts a local viewer window in your browser and refreshes the rendered frame as you simulate new inputs.
 
 Examples:
 
@@ -286,12 +367,53 @@ Examples:
 ### File mode
 
 ```bash
-go run ./cmd/ihdl -i examples/and.ihdl -iinp examples/and.iinp -iout examples/and.iout
+go run ./cmd/ihdl examples/and.ihdl -iinp examples/and.iinp -iout examples/and.iout
+```
+
+Linux binary:
+
+```bash
+./ihdl examples/and.ihdl -iinp examples/and.iinp -iout examples/and.iout
+```
+
+Windows PowerShell binary:
+
+```powershell
+.\ihdl.exe .\examples\and.ihdl -iinp .\examples\and.iinp -iout .\examples\and.iout
 ```
 
 Both flags must be given together.
 
-## 12. `.iinp` Format
+To export the latest rendered display frame, use:
+
+```bash
+go run ./cmd/ihdl examples/display_rgb.ihdl -iinp frame.iinp -iout frame.iout -ippf screen.ippf
+```
+
+Linux binary:
+
+```bash
+./ihdl examples/display_rgb.ihdl -iinp frame.iinp -iout frame.iout -ippf screen.ippf
+```
+
+Windows PowerShell binary:
+
+```powershell
+.\ihdl.exe .\examples\display_rgb.ihdl -iinp .\frame.iinp -iout .\frame.iout -ippf .\screen.ippf
+```
+
+`.ippf` files are written with PNG image data using the custom `.ippf` extension.
+
+### Release binaries
+
+GitHub releases include prebuilt binaries for:
+
+- Linux: `ihdl-linux-amd64`
+- Windows: `ihdl-windows-amd64.exe`
+
+Run them the same way as the examples above, replacing the local build name with the downloaded binary name.
+
+## 14. `.iinp` Format
 
 One source signal per line:
 
@@ -313,7 +435,7 @@ Rules:
 - BW values can be decimal `0..255`
 - BW values can also be 8-bit binary
 
-## 13. `.iout` Format
+## 15. `.iout` Format
 
 One output per line:
 
@@ -324,7 +446,7 @@ PX_OUT 255,64,0
 BW_OUT 170
 ```
 
-## 14. Example Modules
+## 16. Example Modules
 
 ### AND gate
 
@@ -376,6 +498,34 @@ BUF B1 PX PX_OUT
 BUF B2 LEVEL BW_OUT
 ```
 
+### Display with RGB and BW pixels
+
+```ihdl
+MODULE DisplayRGB
+
+INPUT_RGB P0
+INPUT_BW P1
+OUTPUT_BW LEVEL
+
+DISPLAY SCREEN 2 1
+PIXEL SCREEN 0 0 P0
+PIXEL SCREEN 1 0 P1
+
+BUF B1 P1 LEVEL
+```
+
+### D flip-flop
+
+```ihdl
+MODULE DFFExample
+
+INPUT D
+CLOCK CLK
+OUTPUT Q
+
+DFF FF1 D CLK Q
+```
+
 ### 3-pixel row module
 
 ```ihdl
@@ -403,9 +553,8 @@ RGBPassthrough C3 P3 L3 O3 B3
 
 You can build larger structures like `3x3` grids by composing row or cell modules the same way.
 
-## 15. Current Limitations
+## 17. Current Limitations
 
-- no sequential elements yet, only clock declaration support
 - no direct bit indexing like `DATA[0]`
 - no pixel arithmetic or pixel logic operations yet
 - `AND`, `OR`, `NOT`, `HIGH`, `LOW`, `SPLIT` are bit-only
