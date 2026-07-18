@@ -138,6 +138,38 @@ func TestGateWithExplicitErrInput(t *testing.T) {
 	}
 }
 
+func TestCrossDependentFeedbackChainResolvesInMultiplePasses(t *testing.T) {
+	circ := &Circuit{
+		Name:    "CrossDeps",
+		Inputs:  []Port{{Name: "R", Kind: SignalBits, Width: 1}, {Name: "S", Kind: SignalBits, Width: 1}},
+		Outputs: []Port{{Name: "TEMP4", Kind: SignalBits, Width: 1}},
+		Wires:   []Port{{Name: "TEMP1", Kind: SignalBits, Width: 1}, {Name: "TEMP2", Kind: SignalBits, Width: 1}, {Name: "TEMP3", Kind: SignalBits, Width: 1}},
+		Signals: map[string]Port{
+			"R": {Name: "R", Kind: SignalBits, Width: 1}, "S": {Name: "S", Kind: SignalBits, Width: 1},
+			"TEMP4": {Name: "TEMP4", Kind: SignalBits, Width: 1},
+			"TEMP1": {Name: "TEMP1", Kind: SignalBits, Width: 1}, "TEMP2": {Name: "TEMP2", Kind: SignalBits, Width: 1}, "TEMP3": {Name: "TEMP3", Kind: SignalBits, Width: 1},
+		},
+		Ops: []Operation{
+			{Kind: "OR", Name: "O1", Inputs: []string{"R", "TEMP1"}, Outputs: []string{"TEMP2"}},
+			{Kind: "OR", Name: "O2", Inputs: []string{"S", "TEMP3"}, Outputs: []string{"TEMP1"}},
+			{Kind: "NOT", Name: "N1", Inputs: []string{"TEMP2"}, Outputs: []string{"TEMP3"}},
+			{Kind: "NOT", Name: "N2", Inputs: []string{"TEMP1"}, Outputs: []string{"TEMP4"}},
+		},
+	}
+	proj := &Project{Entry: circ, Circuits: map[string]*Circuit{"CrossDeps": circ}}
+
+	outputs, err := Evaluate(proj, circ, map[string]Value{
+		"R": {Kind: SignalBits, Bits: []bool{true}},
+		"S": {Kind: SignalBits, Bits: []bool{false}},
+	})
+	if err != nil {
+		t.Fatalf("evaluate cross-deps: %v", err)
+	}
+	if got := formatValue(outputs["TEMP4"]); got != "1" {
+		t.Fatalf("expected TEMP4=1, got %s", got)
+	}
+}
+
 func TestEvaluateSplitAndConstants(t *testing.T) {
 	project := &Project{
 		Circuits: map[string]*Circuit{},

@@ -246,8 +246,7 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 			rightOk = false
 		}
 		if !leftOk && !rightOk {
-			env[op.Outputs[0]] = errValue(op)
-			return true, nil
+			return false, nil
 		}
 		if !leftOk {
 			value, applied, err := shortCircuitGate(op, right, circuit)
@@ -255,8 +254,7 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 				return false, err
 			}
 			if !applied {
-				env[op.Outputs[0]] = errValue(op)
-				return true, nil
+				return false, nil
 			}
 			env[op.Outputs[0]] = value
 			if err := inferSignalPort(circuit, op.Outputs[0], value); err != nil {
@@ -270,8 +268,7 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 				return false, err
 			}
 			if !applied {
-				env[op.Outputs[0]] = errValue(op)
-				return true, nil
+				return false, nil
 			}
 			env[op.Outputs[0]] = value
 			if err := inferSignalPort(circuit, op.Outputs[0], value); err != nil {
@@ -300,11 +297,7 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 	case "NOT":
 		input, ok := env[op.Inputs[0]]
 		if !ok || input.Kind != SignalBits {
-			env[op.Outputs[0]] = errValue(op)
-			return true, nil
-		}
-		if input.Kind != SignalBits {
-			return false, fmt.Errorf("gate %s in module %s only supports bit signals", op.Name, circuit.Name)
+			return false, nil
 		}
 		result := make([]bool, len(input.Bits))
 		for i := range input.Bits {
@@ -320,8 +313,7 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 	case "BUF":
 		input, ok := env[op.Inputs[0]]
 		if !ok || input.Kind == SignalErr {
-			env[op.Outputs[0]] = errValue(op)
-			return true, nil
+			return false, nil
 		}
 		env[op.Outputs[0]] = cloneValue(input)
 		if err := inferSignalPort(circuit, op.Outputs[0], input); err != nil {
@@ -332,13 +324,7 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 	case "SPLIT":
 		source, ok := env[op.Inputs[0]]
 		if !ok || source.Kind != SignalBits {
-			for _, output := range op.Outputs {
-				env[output] = errValue(op)
-			}
-			return true, nil
-		}
-		if source.Kind != SignalBits {
-			return false, fmt.Errorf("split in module %s only supports bit signals", circuit.Name)
+			return false, nil
 		}
 		if len(source.Bits) != len(op.Outputs) {
 			return false, fmt.Errorf("split in module %s expected %d outputs for %s, got %d", circuit.Name, len(source.Bits), op.Inputs[0], len(op.Outputs))
@@ -350,18 +336,12 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 
 	case "JOIN":
 		bits := make([]bool, len(op.Inputs))
-		allDone := true
 		for i, inputName := range op.Inputs {
 			input, ok := env[inputName]
 			if !ok || input.Kind != SignalBits || len(input.Bits) != 1 {
-				allDone = false
-				continue
+				return false, nil
 			}
 			bits[i] = input.Bits[0]
-		}
-		if !allDone {
-			env[op.Outputs[0]] = errValue(op)
-			return true, nil
 		}
 		value := Value{Kind: SignalBits, Bits: bits}
 		env[op.Outputs[0]] = value
@@ -381,25 +361,16 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 			return false, fmt.Errorf("module %s instance %s expected %d signals, got %d", child.Name, op.Name, expectedSignals, len(op.Signals))
 		}
 		childInputs := make(map[string]Value, len(sources))
-		allReady := true
 		for i, in := range sources {
 			parentSignal := op.Signals[i]
 			value, ok := env[parentSignal]
 			if !ok || value.Kind == SignalErr {
-				allReady = false
-				continue
+				return false, nil
 			}
 			if err := ensurePortValue(in, value, child.Name); err != nil {
 				return false, fmt.Errorf("module %s instance %s using %s: %w", child.Name, op.Name, parentSignal, err)
 			}
 			childInputs[in.Name] = cloneValue(value)
-		}
-		if !allReady {
-			for i := range child.Outputs {
-				parentSignal := op.Signals[len(sources)+i]
-				env[parentSignal] = errValue(op)
-			}
-			return true, nil
 		}
 		childOutputs, err := evaluate(project, child, childInputs, childScope(scope, op))
 		if err != nil {
