@@ -201,18 +201,6 @@ func loadCircuit(path string, registry map[string]*Circuit, loading map[string]b
 			}
 			circuit.Ops = append(circuit.Ops, Operation{Kind: fields[0], Name: fields[1], Inputs: []string{fields[2]}, Outputs: []string{fields[3]}})
 
-		case "DFF", "TFF":
-			if len(fields) != 5 {
-				return nil, fmt.Errorf("%s:%d: invalid %s", cleanPath, lineNo+1, fields[0])
-			}
-			circuit.Ops = append(circuit.Ops, Operation{Kind: fields[0], Name: fields[1], Inputs: []string{fields[2], fields[3]}, Outputs: []string{fields[4]}})
-
-		case "SRFF", "JKFF":
-			if len(fields) != 6 {
-				return nil, fmt.Errorf("%s:%d: invalid %s", cleanPath, lineNo+1, fields[0])
-			}
-			circuit.Ops = append(circuit.Ops, Operation{Kind: fields[0], Name: fields[1], Inputs: []string{fields[2], fields[3], fields[4]}, Outputs: []string{fields[5]}})
-
 		case "SPLIT":
 			if len(fields) < 3 {
 				return nil, fmt.Errorf("%s:%d: invalid SPLIT", cleanPath, lineNo+1)

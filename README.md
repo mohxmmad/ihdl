@@ -15,7 +15,6 @@ Current features:
 - explicit module instantiation
 - internal wires
 - clocks as source ports
-- rising-edge flip-flops: `DFF`, `TFF`, `SRFF`, `JKFF`
 - interactive simulation
 - file-based simulation with `.iinp` and `.iout`
 - typed pixels: RGB and grayscale/BW
@@ -106,8 +105,7 @@ Rules:
 
 - clock must be 1 bit
 - clock is read as a source signal during simulation
-- sequential elements trigger on the rising edge (`0 -> 1`)
-- flip-flops start at `0` unless set by an earlier clock edge in the same simulation session
+- clock behavior is currently manual and combinational-only during simulation
 
 ## 6. Gates
 
@@ -171,48 +169,7 @@ Rules:
 - `LOW` fills every bit with `0`
 - constants only work on bit signals and buses
 
-## 8. Flip-Flops
-
-All flip-flops are rising-edge triggered and keep their state across repeated evaluations in the same simulator session.
-
-### DFF
-
-```ihdl
-DFF FF1 D CLK Q
-```
-
-- `D` and `Q` can be 1-bit signals or bit buses
-- `CLK` must be 1 bit
-
-### TFF
-
-```ihdl
-TFF FF1 T CLK Q
-```
-
-- `T`, `CLK`, and `Q` must be 1 bit
-- on a rising edge, `Q` toggles only when `T = 1`
-
-### SRFF
-
-```ihdl
-SRFF FF1 S R CLK Q
-```
-
-- `S`, `R`, `CLK`, and `Q` must be 1 bit
-- on a rising edge: `10` sets, `01` resets, `00` holds
-- `11` is treated as an invalid state
-
-### JKFF
-
-```ihdl
-JKFF FF1 J K CLK Q
-```
-
-- `J`, `K`, `CLK`, and `Q` must be 1 bit
-- on a rising edge: `10` sets, `01` resets, `00` holds, `11` toggles
-
-## 9. Splitter
+## 8. Splitter
 
 Use `SPLIT` to split a bit bus into 1-bit outputs.
 
@@ -231,7 +188,7 @@ Rules:
 - number of outputs must match bus width
 - each split output is 1 bit
 
-## 10. Join
+## 9. Join
 
 Use `JOIN` to combine 1-bit signals into a bus.
 
@@ -251,7 +208,7 @@ Rules:
 - output width must match the number of joined inputs
 - input order becomes bus bit order
 
-## 11. Modules
+## 10. Modules
 
 ### Define a module
 
@@ -306,7 +263,7 @@ Instantiate it like:
 Child U1 A CLK OUT
 ```
 
-## 12. Internal Wires
+## 11. Internal Wires
 
 Use `WIRE`, `WIRE_RGB`, or `WIRE_BW` for temporary values.
 
@@ -327,7 +284,7 @@ AndGate A1 A B TEMP1
 AndGate A2 TEMP1 C OUT
 ```
 
-## 13. Running the Simulator
+## 12. Running the Simulator
 
 ### Build the binary
 
@@ -351,9 +308,20 @@ go build -o ihdl.exe .\cmd\ihdl
 go run ./cmd/ihdl examples/and.ihdl
 ```
 
-The simulator asks for values based on the module's declared inputs and clocks.
+The simulator asks for initial values once, then keeps running until you enter `stop`.
 
-If the module declares a `DISPLAY`, iHDL also starts a local viewer window in your browser and refreshes the rendered frame as you simulate new inputs.
+After startup you can use:
+
+- `set <signal> <value>` to change one source signal and immediately recompute outputs
+- `<signal> <value>` as a shorter form of `set`
+- `clock auto <clock> <hz>` to start automatic half-cycle toggling for a clock source
+- `clock manual <clock>` to stop automatic ticking and return that clock to manual control
+- `clock step <clock> half` to advance one half cycle manually
+- `clock step <clock> full` to advance two half cycles manually
+- `show` to recompute and print outputs again without changing inputs
+- `stop` to end the simulation session
+
+If the module declares a `DISPLAY`, iHDL also starts a local viewer window in your browser and refreshes the rendered frame after each change.
 
 Examples:
 
@@ -413,7 +381,7 @@ GitHub releases include prebuilt binaries for:
 
 Run them the same way as the examples above, replacing the local build name with the downloaded binary name.
 
-## 14. `.iinp` Format
+## 13. `.iinp` Format
 
 One source signal per line:
 
@@ -435,7 +403,7 @@ Rules:
 - BW values can be decimal `0..255`
 - BW values can also be 8-bit binary
 
-## 15. `.iout` Format
+## 14. `.iout` Format
 
 One output per line:
 
@@ -446,7 +414,7 @@ PX_OUT 255,64,0
 BW_OUT 170
 ```
 
-## 16. Example Modules
+## 15. Example Modules
 
 ### AND gate
 
@@ -514,18 +482,6 @@ PIXEL SCREEN 1 0 P1
 BUF B1 P1 LEVEL
 ```
 
-### D flip-flop
-
-```ihdl
-MODULE DFFExample
-
-INPUT D
-CLOCK CLK
-OUTPUT Q
-
-DFF FF1 D CLK Q
-```
-
 ### 3-pixel row module
 
 ```ihdl
@@ -553,7 +509,7 @@ RGBPassthrough C3 P3 L3 O3 B3
 
 You can build larger structures like `3x3` grids by composing row or cell modules the same way.
 
-## 17. Current Limitations
+## 16. Current Limitations
 
 - no direct bit indexing like `DATA[0]`
 - no pixel arithmetic or pixel logic operations yet

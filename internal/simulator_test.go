@@ -1,9 +1,12 @@
 package internal
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestEvaluateAnd(t *testing.T) {
@@ -32,6 +35,56 @@ func TestEvaluateAnd(t *testing.T) {
 	}
 	if !outputs["OUT"].Bits[0] {
 		t.Fatalf("expected OUT=1, got 0")
+	}
+}
+
+func TestEvaluateShortCircuitGatesWithUndefinedInputs(t *testing.T) {
+	andProject := &Project{
+		Circuits: map[string]*Circuit{},
+		Entry: &Circuit{
+			Name:    "AndFeedback",
+			Inputs:  []Port{{Name: "A", Kind: SignalBits, Width: 1}},
+			Outputs: []Port{{Name: "OUT", Kind: SignalBits, Width: 1}},
+			Wires:   []Port{{Name: "FB", Kind: SignalBits, Width: 1}},
+			Signals: map[string]Port{"A": {Name: "A", Kind: SignalBits, Width: 1}, "OUT": {Name: "OUT", Kind: SignalBits, Width: 1}, "FB": {Name: "FB", Kind: SignalBits, Width: 1}},
+			Ops:     []Operation{{Kind: "AND", Name: "G1", Inputs: []string{"A", "FB"}, Outputs: []string{"OUT"}}},
+		},
+	}
+
+	outputs, err := Evaluate(andProject, andProject.Entry, map[string]Value{"A": {Kind: SignalBits, Bits: []bool{false}}})
+	if err != nil {
+		t.Fatalf("short-circuit and: %v", err)
+	}
+	if got := formatValue(outputs["OUT"]); got != "0" {
+		t.Fatalf("expected OUT=0, got %s", got)
+	}
+
+	if _, err := Evaluate(andProject, andProject.Entry, map[string]Value{"A": {Kind: SignalBits, Bits: []bool{true}}}); err == nil || !strings.Contains(err.Error(), "unresolved signals") {
+		t.Fatalf("expected unresolved and when output is uncertain, got %v", err)
+	}
+
+	orProject := &Project{
+		Circuits: map[string]*Circuit{},
+		Entry: &Circuit{
+			Name:    "OrFeedback",
+			Inputs:  []Port{{Name: "A", Kind: SignalBits, Width: 1}},
+			Outputs: []Port{{Name: "OUT", Kind: SignalBits, Width: 1}},
+			Wires:   []Port{{Name: "FB", Kind: SignalBits, Width: 1}},
+			Signals: map[string]Port{"A": {Name: "A", Kind: SignalBits, Width: 1}, "OUT": {Name: "OUT", Kind: SignalBits, Width: 1}, "FB": {Name: "FB", Kind: SignalBits, Width: 1}},
+			Ops:     []Operation{{Kind: "OR", Name: "G1", Inputs: []string{"A", "FB"}, Outputs: []string{"OUT"}}},
+		},
+	}
+
+	outputs, err = Evaluate(orProject, orProject.Entry, map[string]Value{"A": {Kind: SignalBits, Bits: []bool{true}}})
+	if err != nil {
+		t.Fatalf("short-circuit or: %v", err)
+	}
+	if got := formatValue(outputs["OUT"]); got != "1" {
+		t.Fatalf("expected OUT=1, got %s", got)
+	}
+
+	if _, err := Evaluate(orProject, orProject.Entry, map[string]Value{"A": {Kind: SignalBits, Bits: []bool{false}}}); err == nil || !strings.Contains(err.Error(), "unresolved signals") {
+		t.Fatalf("expected unresolved or when output is uncertain, got %v", err)
 	}
 }
 
@@ -183,116 +236,116 @@ func TestClockIsAcceptedInEvaluationAndFiles(t *testing.T) {
 	}
 }
 
-func TestDFFCapturesOnRisingEdge(t *testing.T) {
-	project, err := ParseProject(filepath.Join("..", "examples", "dff.ihdl"))
+func TestParseRejectsFlipFlops(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dff.ihdl")
+	data := strings.Join([]string{
+		"MODULE DFFExample",
+		"INPUT D",
+		"CLOCK CLK",
+		"OUTPUT Q",
+		"DFF FF1 D CLK Q",
+		"",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write module: %v", err)
+	}
+	if _, err := ParseProject(path); err == nil || !strings.Contains(err.Error(), "unknown keyword DFF") {
+		t.Fatalf("expected DFF parse error, got %v", err)
+	}
+}
+
+func TestInteractiveSimulationRunsUntilStopAndUpdatesOutputs(t *testing.T) {
+	project, err := ParseProject(filepath.Join("..", "examples", "and.ihdl"))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 
-	steps := []struct {
-		name string
-		in   map[string]Value
-		want string
-	}{
-		{
-			name: "initial low clock holds reset state",
-			in: map[string]Value{
-				"D":   {Kind: SignalBits, Bits: []bool{false}},
-				"CLK": {Kind: SignalBits, Bits: []bool{false}},
-			},
-			want: "0",
-		},
-		{
-			name: "data change without edge does not latch",
-			in: map[string]Value{
-				"D":   {Kind: SignalBits, Bits: []bool{true}},
-				"CLK": {Kind: SignalBits, Bits: []bool{false}},
-			},
-			want: "0",
-		},
-		{
-			name: "rising edge captures one",
-			in: map[string]Value{
-				"D":   {Kind: SignalBits, Bits: []bool{true}},
-				"CLK": {Kind: SignalBits, Bits: []bool{true}},
-			},
-			want: "1",
-		},
-		{
-			name: "high clock level alone does not recapture",
-			in: map[string]Value{
-				"D":   {Kind: SignalBits, Bits: []bool{false}},
-				"CLK": {Kind: SignalBits, Bits: []bool{true}},
-			},
-			want: "1",
-		},
-		{
-			name: "falling edge holds state",
-			in: map[string]Value{
-				"D":   {Kind: SignalBits, Bits: []bool{false}},
-				"CLK": {Kind: SignalBits, Bits: []bool{false}},
-			},
-			want: "1",
-		},
-		{
-			name: "next rising edge captures zero",
-			in: map[string]Value{
-				"D":   {Kind: SignalBits, Bits: []bool{false}},
-				"CLK": {Kind: SignalBits, Bits: []bool{true}},
-			},
-			want: "0",
-		},
+	input := bytes.NewBufferString("0\n0\nset A 1\nB 1\nstop\n")
+	var output bytes.Buffer
+	if err := simulateWithIO(project, SimulationOptions{}, input, &output); err != nil {
+		t.Fatalf("simulate: %v", err)
 	}
 
-	for _, step := range steps {
-		outputs, err := Evaluate(project, project.Entry, step.in)
-		if err != nil {
-			t.Fatalf("%s: evaluate: %v", step.name, err)
-		}
-		if got := formatValue(outputs["Q"]); got != step.want {
-			t.Fatalf("%s: expected Q=%s, got %s", step.name, step.want, got)
-		}
+	text := output.String()
+	if strings.Count(text, "OUT = 0") != 2 {
+		t.Fatalf("expected two intermediate OUT = 0 states, got output %q", text)
+	}
+	if !strings.Contains(text, "OUT = 1") {
+		t.Fatalf("expected live update to OUT = 1, got output %q", text)
+	}
+	if !strings.Contains(text, "Command (set <signal> <value> | clock <auto|manual|step> ... | show | stop):") {
+		t.Fatalf("expected persistent command prompt, got output %q", text)
 	}
 }
 
-func TestDFFStateIsScopedPerInstance(t *testing.T) {
-	child := &Circuit{
-		Name:    "BitCell",
-		Inputs:  []Port{{Name: "D", Kind: SignalBits, Width: 1}},
-		Clocks:  []Port{{Name: "CLK", Kind: SignalBits, Width: 1}},
-		Outputs: []Port{{Name: "Q", Kind: SignalBits, Width: 1}},
-		Signals: map[string]Port{"D": {Name: "D", Kind: SignalBits, Width: 1}, "CLK": {Name: "CLK", Kind: SignalBits, Width: 1}, "Q": {Name: "Q", Kind: SignalBits, Width: 1}},
-		Ops:     []Operation{{Kind: "DFF", Name: "FF1", Inputs: []string{"D", "CLK"}, Outputs: []string{"Q"}}},
+func TestInteractiveManualClockStepping(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "clock_echo.ihdl")
+	data := strings.Join([]string{
+		"MODULE ClockEcho",
+		"CLOCK CLK",
+		"OUTPUT Q",
+		"BUF B1 CLK Q",
+		"",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write module: %v", err)
 	}
-	parent := &Circuit{
-		Name:    "Top",
-		Inputs:  []Port{{Name: "A", Kind: SignalBits, Width: 1}, {Name: "B", Kind: SignalBits, Width: 1}},
-		Clocks:  []Port{{Name: "CLK", Kind: SignalBits, Width: 1}},
-		Outputs: []Port{{Name: "QA", Kind: SignalBits, Width: 1}, {Name: "QB", Kind: SignalBits, Width: 1}},
-		Signals: map[string]Port{"A": {Name: "A", Kind: SignalBits, Width: 1}, "B": {Name: "B", Kind: SignalBits, Width: 1}, "CLK": {Name: "CLK", Kind: SignalBits, Width: 1}, "QA": {Name: "QA", Kind: SignalBits, Width: 1}, "QB": {Name: "QB", Kind: SignalBits, Width: 1}},
-		Ops: []Operation{
-			{Kind: "USE", Name: "LEFT", Module: "BitCell", Signals: []string{"A", "CLK", "QA"}},
-			{Kind: "USE", Name: "RIGHT", Module: "BitCell", Signals: []string{"B", "CLK", "QB"}},
-		},
-	}
-	project := &Project{Entry: parent, Circuits: map[string]*Circuit{"Top": parent, "BitCell": child}}
-
-	outputs, err := Evaluate(project, parent, map[string]Value{
-		"A":   {Kind: SignalBits, Bits: []bool{true}},
-		"B":   {Kind: SignalBits, Bits: []bool{false}},
-		"CLK": {Kind: SignalBits, Bits: []bool{true}},
-	})
+	project, err := ParseProject(path)
 	if err != nil {
-		t.Fatalf("evaluate: %v", err)
+		t.Fatalf("parse: %v", err)
 	}
-	if got := formatValue(outputs["QA"]); got != "1" {
-		t.Fatalf("expected QA=1, got %s", got)
+
+	input := bytes.NewBufferString("0\nclock step CLK half\nclock step CLK full\nstop\n")
+	var output bytes.Buffer
+	if err := simulateWithIO(project, SimulationOptions{}, input, &output); err != nil {
+		t.Fatalf("simulate: %v", err)
 	}
-	if got := formatValue(outputs["QB"]); got != "0" {
-		t.Fatalf("expected QB=0, got %s", got)
+
+	text := output.String()
+	if strings.Count(text, "Q = 1") != 2 {
+		t.Fatalf("expected two high states from half+full stepping, got output %q", text)
 	}
-	if len(project.State) != 2 {
-		t.Fatalf("expected isolated state per instance, got %d state entries", len(project.State))
+	if strings.Count(text, "Q = 0") != 2 {
+		t.Fatalf("expected initial and intermediate low states, got output %q", text)
+	}
+}
+
+func TestParseClockCommands(t *testing.T) {
+	declared := map[string]Port{"CLK": {Name: "CLK", Kind: SignalBits, Width: 1}}
+	clocks := map[string]Port{"CLK": {Name: "CLK", Kind: SignalBits, Width: 1}}
+
+	command, err := parseSimulationCommand("clock auto CLK 0.5", declared, clocks)
+	if err != nil {
+		t.Fatalf("parse auto: %v", err)
+	}
+	if command.kind != simulationCommandClockAuto || command.clockName != "CLK" || command.frequencyHz != 0.5 {
+		t.Fatalf("unexpected auto command: %#v", command)
+	}
+
+	command, err = parseSimulationCommand("clock step CLK full", declared, clocks)
+	if err != nil {
+		t.Fatalf("parse step: %v", err)
+	}
+	if command.kind != simulationCommandClockStep || command.clockSteps != 2 {
+		t.Fatalf("unexpected step command: %#v", command)
+	}
+}
+
+func TestAdvanceAutoClocks(t *testing.T) {
+	inputs := map[string]Value{"CLK": {Kind: SignalBits, Bits: []bool{false}}}
+	now := time.Now()
+	states := map[string]*clockState{
+		"CLK": {mode: clockModeAuto, frequency: 0.5, nextToggle: now.Add(-250 * time.Millisecond)},
+	}
+
+	if !advanceAutoClocks(inputs, states, now.Add(2250*time.Millisecond)) {
+		t.Fatalf("expected auto clock advance")
+	}
+	if got := formatValue(inputs["CLK"]); got != "1" {
+		t.Fatalf("expected CLK to toggle three times to 1, got %s", got)
+	}
+	if !states["CLK"].nextToggle.After(now.Add(2250 * time.Millisecond)) {
+		t.Fatalf("expected next toggle to move into the future")
 	}
 }
 

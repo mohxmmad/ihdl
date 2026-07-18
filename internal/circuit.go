@@ -66,7 +66,5 @@ type Circuit struct {
 type Project struct {
 	Entry    *Circuit
 	Circuits map[string]*Circuit
-	State    map[string]Value
-	Clocks   map[string]bool
 	Frames   map[string]DisplayFrame
 }

@@ -3,11 +3,13 @@ package internal
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func Simulate(project *Project) error {
@@ -15,57 +17,104 @@ func Simulate(project *Project) error {
 }
 
 func SimulateWithOptions(project *Project, options SimulationOptions) error {
-	reader := bufio.NewReader(os.Stdin)
+	return simulateWithIO(project, options, os.Stdin, os.Stdout)
+}
+
+func simulateWithIO(project *Project, options SimulationOptions, input io.Reader, output io.Writer) error {
+	reader := bufio.NewReader(input)
 	var viewer *displayViewer
+	ports := allSourcePorts(project.Entry)
+	inputs := make(map[string]Value, len(ports))
+	declared := make(map[string]Port, len(ports))
+	clocks := make(map[string]Port, len(project.Entry.Clocks))
+
+	for _, port := range ports {
+		declared[port.Name] = port
+		value, err := readInput(reader, output, port)
+		if err != nil {
+			return err
+		}
+		inputs[port.Name] = value
+	}
+	for _, port := range project.Entry.Clocks {
+		clocks[port.Name] = port
+	}
+	clockStates := initializeClockStates(project.Entry.Clocks)
+
+	var err error
+	viewer, err = evaluateAndRenderStep(project, options, inputs, viewer, output)
+	if err != nil {
+		return err
+	}
+	printSimulationPrompt(output)
+
+	lines := make(chan simulationLine)
+	go readSimulationLines(reader, lines)
 
 	for {
-		inputs := make(map[string]Value, len(allSourcePorts(project.Entry)))
-		for _, in := range allSourcePorts(project.Entry) {
-			value, err := readInput(reader, in)
+		timer, timerCh := nextAutoClockTimer(clockStates, time.Now())
+		select {
+		case line, ok := <-lines:
+			stopClockTimer(timer)
+			if !ok || (line.err == io.EOF && strings.TrimSpace(line.text) == "") {
+				return nil
+			}
+			if line.err != nil {
+				return line.err
+			}
+
+			command, err := parseSimulationCommand(line.text, declared, clocks)
 			if err != nil {
-				return err
+				fmt.Fprintf(output, "%v\n", err)
+				printSimulationPrompt(output)
+				continue
 			}
-			inputs[in.Name] = value
-		}
 
-		outputs, err := Evaluate(project, project.Entry, inputs)
-		if err != nil {
-			return err
-		}
-		frames := listDisplayFrames(project)
-		if len(frames) > 0 {
-			if viewer == nil {
-				viewer, err = newDisplayViewer()
-				if err == nil {
-					fmt.Printf("\nDisplay viewer: %s\n", viewer.URL())
+			rerender := true
+			switch command.kind {
+			case simulationCommandStop:
+				return nil
+			case simulationCommandSet:
+				inputs[command.port.Name] = command.value
+			case simulationCommandClockAuto:
+				if err := setClockAuto(clockStates, command.clockName, command.frequencyHz, time.Now()); err != nil {
+					fmt.Fprintf(output, "%v\n", err)
+					printSimulationPrompt(output)
+					continue
 				}
+			case simulationCommandClockManual:
+				if err := setClockManual(clockStates, command.clockName); err != nil {
+					fmt.Fprintf(output, "%v\n", err)
+					printSimulationPrompt(output)
+					continue
+				}
+			case simulationCommandClockStep:
+				viewer, err = stepManualClock(project, options, inputs, viewer, output, clockStates, command.clockName, command.clockSteps)
+				if err != nil {
+					fmt.Fprintf(output, "%v\n", err)
+					printSimulationPrompt(output)
+					continue
+				}
+				rerender = false
 			}
-			if viewer != nil {
-				if err := viewer.Update(frames); err != nil {
+
+			if rerender {
+				viewer, err = evaluateAndRenderStep(project, options, inputs, viewer, output)
+				if err != nil {
 					return err
 				}
 			}
-			if options.DisplayExportPath != "" {
-				if err := WriteDisplayFiles(project, options.DisplayExportPath); err != nil {
+			printSimulationPrompt(output)
+
+		case now := <-timerCh:
+			if advanceAutoClocks(inputs, clockStates, now) {
+				viewer, err = evaluateAndRenderStep(project, options, inputs, viewer, output)
+				if err != nil {
 					return err
 				}
+				printSimulationPrompt(output)
 			}
 		}
-
-		fmt.Println()
-		for _, out := range project.Entry.Outputs {
-			fmt.Printf("%s = %s\n", out.Name, formatValue(outputs[out.Name]))
-		}
-
-		fmt.Print("\nAgain? (y/n): ")
-		answer, err := reader.ReadString('\n')
-		if err != nil {
-			return err
-		}
-		if strings.TrimSpace(strings.ToLower(answer)) != "y" {
-			return nil
-		}
-		fmt.Println()
 	}
 }
 
@@ -97,8 +146,6 @@ func Evaluate(project *Project, circuit *Circuit, inputs map[string]Value) (map[
 }
 
 func evaluate(project *Project, circuit *Circuit, inputs map[string]Value, scope string) (map[string]Value, error) {
-	ensureProjectState(project)
-
 	env := make(map[string]Value)
 	for _, in := range allSourcePorts(circuit) {
 		value, ok := inputs[in.Name]
@@ -179,11 +226,37 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 	case "AND", "OR":
 		left, ok := env[op.Inputs[0]]
 		if !ok {
-			return false, nil
+			right, ok := env[op.Inputs[1]]
+			if !ok {
+				return false, nil
+			}
+			value, applied, err := shortCircuitGate(op, right, circuit)
+			if err != nil {
+				return false, err
+			}
+			if !applied {
+				return false, nil
+			}
+			env[op.Outputs[0]] = value
+			if err := inferSignalPort(circuit, op.Outputs[0], value); err != nil {
+				return false, err
+			}
+			return true, nil
 		}
 		right, ok := env[op.Inputs[1]]
 		if !ok {
-			return false, nil
+			value, applied, err := shortCircuitGate(op, left, circuit)
+			if err != nil {
+				return false, err
+			}
+			if !applied {
+				return false, nil
+			}
+			env[op.Outputs[0]] = value
+			if err := inferSignalPort(circuit, op.Outputs[0], value); err != nil {
+				return false, err
+			}
+			return true, nil
 		}
 		if left.Kind != SignalBits || right.Kind != SignalBits {
 			return false, fmt.Errorf("gate %s in module %s only supports bit signals", op.Name, circuit.Name)
@@ -232,90 +305,6 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 		}
 		env[op.Outputs[0]] = cloneValue(input)
 		if err := inferSignalPort(circuit, op.Outputs[0], input); err != nil {
-			return false, err
-		}
-		return true, nil
-
-	case "DFF":
-		data, ok := env[op.Inputs[0]]
-		if !ok {
-			return false, nil
-		}
-		clock, ok := env[op.Inputs[1]]
-		if !ok {
-			return false, nil
-		}
-		value, err := applyDFF(project, scope, op, circuit, data, clock)
-		if err != nil {
-			return false, err
-		}
-		env[op.Outputs[0]] = value
-		if err := inferSignalPort(circuit, op.Outputs[0], value); err != nil {
-			return false, err
-		}
-		return true, nil
-
-	case "TFF":
-		toggle, ok := env[op.Inputs[0]]
-		if !ok {
-			return false, nil
-		}
-		clock, ok := env[op.Inputs[1]]
-		if !ok {
-			return false, nil
-		}
-		value, err := applyTFF(project, scope, op, circuit, toggle, clock)
-		if err != nil {
-			return false, err
-		}
-		env[op.Outputs[0]] = value
-		if err := inferSignalPort(circuit, op.Outputs[0], value); err != nil {
-			return false, err
-		}
-		return true, nil
-
-	case "SRFF":
-		set, ok := env[op.Inputs[0]]
-		if !ok {
-			return false, nil
-		}
-		reset, ok := env[op.Inputs[1]]
-		if !ok {
-			return false, nil
-		}
-		clock, ok := env[op.Inputs[2]]
-		if !ok {
-			return false, nil
-		}
-		value, err := applySRFF(project, scope, op, circuit, set, reset, clock)
-		if err != nil {
-			return false, err
-		}
-		env[op.Outputs[0]] = value
-		if err := inferSignalPort(circuit, op.Outputs[0], value); err != nil {
-			return false, err
-		}
-		return true, nil
-
-	case "JKFF":
-		j, ok := env[op.Inputs[0]]
-		if !ok {
-			return false, nil
-		}
-		k, ok := env[op.Inputs[1]]
-		if !ok {
-			return false, nil
-		}
-		clock, ok := env[op.Inputs[2]]
-		if !ok {
-			return false, nil
-		}
-		value, err := applyJKFF(project, scope, op, circuit, j, k, clock)
-		if err != nil {
-			return false, err
-		}
-		env[op.Outputs[0]] = value
-		if err := inferSignalPort(circuit, op.Outputs[0], value); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -395,140 +384,34 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 	return false, fmt.Errorf("unknown operation %s in module %s", op.Kind, circuit.Name)
 }
 
-func ensureProjectState(project *Project) {
-	if project.State == nil {
-		project.State = make(map[string]Value)
-	}
-	if project.Clocks == nil {
-		project.Clocks = make(map[string]bool)
-	}
-}
-
-func applyDFF(project *Project, scope string, op Operation, circuit *Circuit, data, clock Value) (Value, error) {
-	if data.Kind != SignalBits {
-		return Value{}, fmt.Errorf("flip-flop %s in module %s only supports bit signals", op.Name, circuit.Name)
-	}
-	rising, err := sequentialClockEdge(project, scope, op, circuit, clock)
-	if err != nil {
-		return Value{}, err
-	}
-	key := sequentialStateKey(scope, op)
-	state := loadStoredBits(project, key, len(data.Bits))
-	if rising {
-		state = cloneValue(data)
-		project.State[key] = cloneValue(state)
-	}
-	return cloneValue(state), nil
-}
-
-func applyTFF(project *Project, scope string, op Operation, circuit *Circuit, toggle, clock Value) (Value, error) {
-	if err := ensureSingleBitValue(toggle, op.Name, circuit.Name); err != nil {
-		return Value{}, err
-	}
-	rising, err := sequentialClockEdge(project, scope, op, circuit, clock)
-	if err != nil {
-		return Value{}, err
-	}
-	key := sequentialStateKey(scope, op)
-	state := loadStoredBits(project, key, 1)
-	if rising && toggle.Bits[0] {
-		state.Bits[0] = !state.Bits[0]
-		project.State[key] = cloneValue(state)
-	}
-	return cloneValue(state), nil
-}
-
-func applySRFF(project *Project, scope string, op Operation, circuit *Circuit, set, reset, clock Value) (Value, error) {
-	if err := ensureSingleBitValue(set, op.Name, circuit.Name); err != nil {
-		return Value{}, err
-	}
-	if err := ensureSingleBitValue(reset, op.Name, circuit.Name); err != nil {
-		return Value{}, err
-	}
-	rising, err := sequentialClockEdge(project, scope, op, circuit, clock)
-	if err != nil {
-		return Value{}, err
-	}
-	key := sequentialStateKey(scope, op)
-	state := loadStoredBits(project, key, 1)
-	if rising {
-		switch {
-		case set.Bits[0] && reset.Bits[0]:
-			return Value{}, fmt.Errorf("flip-flop %s in module %s has invalid SR state with S=1 and R=1", op.Name, circuit.Name)
-		case set.Bits[0]:
-			state.Bits[0] = true
-		case reset.Bits[0]:
-			state.Bits[0] = false
-		}
-		project.State[key] = cloneValue(state)
-	}
-	return cloneValue(state), nil
-}
-
-func applyJKFF(project *Project, scope string, op Operation, circuit *Circuit, j, k, clock Value) (Value, error) {
-	if err := ensureSingleBitValue(j, op.Name, circuit.Name); err != nil {
-		return Value{}, err
-	}
-	if err := ensureSingleBitValue(k, op.Name, circuit.Name); err != nil {
-		return Value{}, err
-	}
-	rising, err := sequentialClockEdge(project, scope, op, circuit, clock)
-	if err != nil {
-		return Value{}, err
-	}
-	key := sequentialStateKey(scope, op)
-	state := loadStoredBits(project, key, 1)
-	if rising {
-		switch {
-		case j.Bits[0] && k.Bits[0]:
-			state.Bits[0] = !state.Bits[0]
-		case j.Bits[0]:
-			state.Bits[0] = true
-		case k.Bits[0]:
-			state.Bits[0] = false
-		}
-		project.State[key] = cloneValue(state)
-	}
-	return cloneValue(state), nil
-}
-
-func sequentialClockEdge(project *Project, scope string, op Operation, circuit *Circuit, clock Value) (bool, error) {
-	if err := ensureSingleBitValue(clock, op.Name, circuit.Name); err != nil {
-		return false, err
-	}
-	key := sequentialClockKey(scope, op)
-	current := clock.Bits[0]
-	previous := project.Clocks[key]
-	project.Clocks[key] = current
-	return !previous && current, nil
-}
-
-func ensureSingleBitValue(value Value, opName, moduleName string) error {
-	if value.Kind != SignalBits || len(value.Bits) != 1 {
-		return fmt.Errorf("flip-flop %s in module %s requires 1-bit control signals", opName, moduleName)
-	}
-	return nil
-}
-
-func loadStoredBits(project *Project, key string, width int) Value {
-	if state, ok := project.State[key]; ok && state.Kind == SignalBits && len(state.Bits) == width {
-		return cloneValue(state)
-	}
-	state := Value{Kind: SignalBits, Bits: make([]bool, width)}
-	project.State[key] = cloneValue(state)
-	return state
-}
-
-func sequentialStateKey(scope string, op Operation) string {
-	return scope + ".state." + op.Name
-}
-
-func sequentialClockKey(scope string, op Operation) string {
-	return scope + ".clock." + op.Name
-}
-
 func childScope(scope string, op Operation) string {
 	return scope + "." + op.Name
+}
+
+func shortCircuitGate(op Operation, known Value, circuit *Circuit) (Value, bool, error) {
+	if known.Kind != SignalBits {
+		return Value{}, false, fmt.Errorf("gate %s in module %s only supports bit signals", op.Name, circuit.Name)
+	}
+	bits := make([]bool, len(known.Bits))
+	switch op.Kind {
+	case "AND":
+		for _, bit := range known.Bits {
+			if bit {
+				return Value{}, false, nil
+			}
+		}
+		return Value{Kind: SignalBits, Bits: bits}, true, nil
+	case "OR":
+		for i, bit := range known.Bits {
+			if !bit {
+				return Value{}, false, nil
+			}
+			bits[i] = true
+		}
+		return Value{Kind: SignalBits, Bits: bits}, true, nil
+	default:
+		return Value{}, false, nil
+	}
 }
 
 func unresolvedError(circuit *Circuit, pending []Operation, env map[string]Value) error {
@@ -565,16 +448,329 @@ func signalPort(circuit *Circuit, name string) (Port, error) {
 	return port, nil
 }
 
-func readInput(reader *bufio.Reader, port Port) (Value, error) {
+type simulationCommandKind string
+
+const (
+	simulationCommandShow        simulationCommandKind = "show"
+	simulationCommandSet         simulationCommandKind = "set"
+	simulationCommandStop        simulationCommandKind = "stop"
+	simulationCommandClockAuto   simulationCommandKind = "clock_auto"
+	simulationCommandClockManual simulationCommandKind = "clock_manual"
+	simulationCommandClockStep   simulationCommandKind = "clock_step"
+)
+
+type clockMode string
+
+const (
+	clockModeManual clockMode = "manual"
+	clockModeAuto   clockMode = "auto"
+)
+
+type simulationCommand struct {
+	kind        simulationCommandKind
+	port        Port
+	value       Value
+	clockName   string
+	frequencyHz float64
+	clockSteps  int
+}
+
+type clockState struct {
+	mode       clockMode
+	frequency  float64
+	nextToggle time.Time
+}
+
+type simulationLine struct {
+	text string
+	err  error
+}
+
+func evaluateAndRenderStep(project *Project, options SimulationOptions, inputs map[string]Value, viewer *displayViewer, output io.Writer) (*displayViewer, error) {
+	outputs, err := Evaluate(project, project.Entry, inputs)
+	if err != nil {
+		return viewer, err
+	}
+	frames := listDisplayFrames(project)
+	if len(frames) > 0 {
+		if viewer == nil {
+			viewer, err = newDisplayViewer()
+			if err == nil {
+				fmt.Fprintf(output, "\nDisplay viewer: %s\n", viewer.URL())
+			}
+		}
+		if viewer != nil {
+			if err := viewer.Update(frames); err != nil {
+				return viewer, err
+			}
+		}
+		if options.DisplayExportPath != "" {
+			if err := WriteDisplayFiles(project, options.DisplayExportPath); err != nil {
+				return viewer, err
+			}
+		}
+	}
+
+	fmt.Fprintln(output)
+	for _, out := range project.Entry.Outputs {
+		fmt.Fprintf(output, "%s = %s\n", out.Name, formatValue(outputs[out.Name]))
+	}
+	return viewer, nil
+}
+
+func parseSimulationCommand(text string, declared map[string]Port, clocks map[string]Port) (simulationCommand, error) {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return simulationCommand{}, fmt.Errorf("enter 'set <signal> <value>', 'clock <auto|manual|step> ...', 'show', or 'stop'")
+	}
+	fields := strings.Fields(trimmed)
+	if len(fields) == 0 {
+		return simulationCommand{}, fmt.Errorf("enter 'set <signal> <value>', 'clock <auto|manual|step> ...', 'show', or 'stop'")
+	}
+
+	switch strings.ToLower(fields[0]) {
+	case "show":
+		if len(fields) != 1 {
+			return simulationCommand{}, fmt.Errorf("show does not take arguments")
+		}
+		return simulationCommand{kind: simulationCommandShow}, nil
+	case "stop", "exit", "quit":
+		if len(fields) != 1 {
+			return simulationCommand{}, fmt.Errorf("stop does not take arguments")
+		}
+		return simulationCommand{kind: simulationCommandStop}, nil
+	case "set":
+		if len(fields) < 3 {
+			return simulationCommand{}, fmt.Errorf("usage: set <signal> <value>")
+		}
+		return buildSetCommand(fields[1], strings.Join(fields[2:], " "), declared)
+	case "clock":
+		return parseClockCommand(fields, clocks)
+	default:
+		if len(fields) < 2 {
+			return simulationCommand{}, fmt.Errorf("unknown command %q", fields[0])
+		}
+		return buildSetCommand(fields[0], strings.Join(fields[1:], " "), declared)
+	}
+}
+
+func parseClockCommand(fields []string, clocks map[string]Port) (simulationCommand, error) {
+	if len(fields) < 2 {
+		return simulationCommand{}, fmt.Errorf("usage: clock <auto|manual|step> ...")
+	}
+	switch strings.ToLower(fields[1]) {
+	case "auto":
+		if len(fields) != 4 {
+			return simulationCommand{}, fmt.Errorf("usage: clock auto <clock> <hz>")
+		}
+		if _, ok := clocks[fields[2]]; !ok {
+			return simulationCommand{}, fmt.Errorf("unknown clock %s", fields[2])
+		}
+		freq, err := strconv.ParseFloat(fields[3], 64)
+		if err != nil {
+			return simulationCommand{}, fmt.Errorf("clock frequency must be a number")
+		}
+		return simulationCommand{kind: simulationCommandClockAuto, clockName: fields[2], frequencyHz: freq}, nil
+	case "manual":
+		if len(fields) != 3 {
+			return simulationCommand{}, fmt.Errorf("usage: clock manual <clock>")
+		}
+		if _, ok := clocks[fields[2]]; !ok {
+			return simulationCommand{}, fmt.Errorf("unknown clock %s", fields[2])
+		}
+		return simulationCommand{kind: simulationCommandClockManual, clockName: fields[2]}, nil
+	case "step":
+		if len(fields) != 4 {
+			return simulationCommand{}, fmt.Errorf("usage: clock step <clock> <half|full>")
+		}
+		if _, ok := clocks[fields[2]]; !ok {
+			return simulationCommand{}, fmt.Errorf("unknown clock %s", fields[2])
+		}
+		steps := 0
+		switch strings.ToLower(fields[3]) {
+		case "half":
+			steps = 1
+		case "full":
+			steps = 2
+		default:
+			return simulationCommand{}, fmt.Errorf("clock step must be 'half' or 'full'")
+		}
+		return simulationCommand{kind: simulationCommandClockStep, clockName: fields[2], clockSteps: steps}, nil
+	default:
+		return simulationCommand{}, fmt.Errorf("unknown clock command %q", fields[1])
+	}
+}
+
+func buildSetCommand(name, rawValue string, declared map[string]Port) (simulationCommand, error) {
+	port, ok := declared[name]
+	if !ok {
+		return simulationCommand{}, fmt.Errorf("unknown source signal %s", name)
+	}
+	value, err := parseValue(rawValue, port)
+	if err != nil {
+		return simulationCommand{}, err
+	}
+	return simulationCommand{kind: simulationCommandSet, port: port, value: value}, nil
+}
+
+func initializeClockStates(clocks []Port) map[string]*clockState {
+	states := make(map[string]*clockState, len(clocks))
+	for _, clock := range clocks {
+		states[clock.Name] = &clockState{mode: clockModeManual}
+	}
+	return states
+}
+
+func setClockAuto(states map[string]*clockState, name string, frequency float64, now time.Time) error {
+	state, ok := states[name]
+	if !ok {
+		return fmt.Errorf("unknown clock %s", name)
+	}
+	halfPeriod, err := clockHalfPeriod(frequency)
+	if err != nil {
+		return err
+	}
+	state.mode = clockModeAuto
+	state.frequency = frequency
+	state.nextToggle = now.Add(halfPeriod)
+	return nil
+}
+
+func setClockManual(states map[string]*clockState, name string) error {
+	state, ok := states[name]
+	if !ok {
+		return fmt.Errorf("unknown clock %s", name)
+	}
+	state.mode = clockModeManual
+	state.frequency = 0
+	state.nextToggle = time.Time{}
+	return nil
+}
+
+func stepManualClock(project *Project, options SimulationOptions, inputs map[string]Value, viewer *displayViewer, output io.Writer, states map[string]*clockState, name string, steps int) (*displayViewer, error) {
+	state, ok := states[name]
+	if !ok {
+		return viewer, fmt.Errorf("unknown clock %s", name)
+	}
+	if state.mode != clockModeManual {
+		return viewer, fmt.Errorf("clock %s is in auto mode; switch it to manual before stepping", name)
+	}
+	for i := 0; i < steps; i++ {
+		if err := toggleClockInput(inputs, name); err != nil {
+			return viewer, err
+		}
+		var err error
+		viewer, err = evaluateAndRenderStep(project, options, inputs, viewer, output)
+		if err != nil {
+			return viewer, err
+		}
+	}
+	return viewer, nil
+}
+
+func toggleClockInput(inputs map[string]Value, name string) error {
+	value, ok := inputs[name]
+	if !ok {
+		return fmt.Errorf("missing clock input %s", name)
+	}
+	if value.Kind != SignalBits || len(value.Bits) != 1 {
+		return fmt.Errorf("clock %s must be 1 bit", name)
+	}
+	value.Bits[0] = !value.Bits[0]
+	inputs[name] = value
+	return nil
+}
+
+func clockHalfPeriod(frequency float64) (time.Duration, error) {
+	if frequency <= 0 {
+		return 0, fmt.Errorf("clock frequency must be greater than 0")
+	}
+	halfPeriod := float64(time.Second) / (2 * frequency)
+	if halfPeriod < 1 {
+		halfPeriod = 1
+	}
+	return time.Duration(halfPeriod), nil
+}
+
+func nextAutoClockTimer(states map[string]*clockState, now time.Time) (*time.Timer, <-chan time.Time) {
+	var next time.Time
+	for _, state := range states {
+		if state.mode != clockModeAuto {
+			continue
+		}
+		if next.IsZero() || state.nextToggle.Before(next) {
+			next = state.nextToggle
+		}
+	}
+	if next.IsZero() {
+		return nil, nil
+	}
+	delay := time.Until(next)
+	if delay < 0 {
+		delay = 0
+	}
+	timer := time.NewTimer(delay)
+	return timer, timer.C
+}
+
+func stopClockTimer(timer *time.Timer) {
+	if timer == nil {
+		return
+	}
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+}
+
+func advanceAutoClocks(inputs map[string]Value, states map[string]*clockState, now time.Time) bool {
+	changed := false
+	for name, state := range states {
+		if state.mode != clockModeAuto {
+			continue
+		}
+		halfPeriod, err := clockHalfPeriod(state.frequency)
+		if err != nil {
+			continue
+		}
+		for !state.nextToggle.After(now) {
+			if err := toggleClockInput(inputs, name); err != nil {
+				break
+			}
+			state.nextToggle = state.nextToggle.Add(halfPeriod)
+			changed = true
+		}
+	}
+	return changed
+}
+
+func readSimulationLines(reader *bufio.Reader, lines chan<- simulationLine) {
+	defer close(lines)
 	for {
-		fmt.Print(inputPrompt(port))
+		text, err := reader.ReadString('\n')
+		lines <- simulationLine{text: text, err: err}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func printSimulationPrompt(output io.Writer) {
+	fmt.Fprint(output, "\nCommand (set <signal> <value> | clock <auto|manual|step> ... | show | stop): ")
+}
+
+func readInput(reader *bufio.Reader, output io.Writer, port Port) (Value, error) {
+	for {
+		fmt.Fprint(output, inputPrompt(port))
 		text, err := reader.ReadString('\n')
 		if err != nil {
 			return Value{}, err
 		}
 		value, err := parseValue(strings.TrimSpace(text), port)
 		if err != nil {
-			fmt.Printf("%v\n", err)
+			fmt.Fprintf(output, "%v\n", err)
 			continue
 		}
 		return value, nil
