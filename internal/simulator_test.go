@@ -59,8 +59,12 @@ func TestEvaluateShortCircuitGatesWithUndefinedInputs(t *testing.T) {
 		t.Fatalf("expected OUT=0, got %s", got)
 	}
 
-	if _, err := Evaluate(andProject, andProject.Entry, map[string]Value{"A": {Kind: SignalBits, Bits: []bool{true}}}); err == nil || !strings.Contains(err.Error(), "unresolved signals") {
-		t.Fatalf("expected unresolved and when output is uncertain, got %v", err)
+	outputs, err = Evaluate(andProject, andProject.Entry, map[string]Value{"A": {Kind: SignalBits, Bits: []bool{true}}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := formatValue(outputs["OUT"]); got != "err" {
+		t.Fatalf("expected err when AND output is uncertain, got %s", got)
 	}
 
 	orProject := &Project{
@@ -83,8 +87,12 @@ func TestEvaluateShortCircuitGatesWithUndefinedInputs(t *testing.T) {
 		t.Fatalf("expected OUT=1, got %s", got)
 	}
 
-	if _, err := Evaluate(orProject, orProject.Entry, map[string]Value{"A": {Kind: SignalBits, Bits: []bool{false}}}); err == nil || !strings.Contains(err.Error(), "unresolved signals") {
-		t.Fatalf("expected unresolved or when output is uncertain, got %v", err)
+	outputs, err = Evaluate(orProject, orProject.Entry, map[string]Value{"A": {Kind: SignalBits, Bits: []bool{false}}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := formatValue(outputs["OUT"]); got != "err" {
+		t.Fatalf("expected err when OR output is uncertain, got %s", got)
 	}
 }
 

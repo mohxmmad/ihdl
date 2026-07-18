@@ -30,11 +30,19 @@ func simulateWithIO(project *Project, options SimulationOptions, input io.Reader
 
 	for _, port := range ports {
 		declared[port.Name] = port
-		value, err := readInput(reader, output, port)
+		fmt.Fprint(output, inputPrompt(port))
+		text, err := reader.ReadString('\n')
 		if err != nil {
 			return err
 		}
-		inputs[port.Name] = value
+		trimmed := strings.TrimSpace(text)
+		if trimmed != "" {
+			value, err := parseValue(trimmed, port)
+			if err != nil {
+				return err
+			}
+			inputs[port.Name] = value
+		}
 	}
 	for _, port := range project.Entry.Clocks {
 		clocks[port.Name] = port
@@ -149,13 +157,12 @@ func evaluate(project *Project, circuit *Circuit, inputs map[string]Value, scope
 	env := make(map[string]Value)
 	for _, in := range allSourcePorts(circuit) {
 		value, ok := inputs[in.Name]
-		if !ok {
-			return nil, fmt.Errorf("missing input %s for module %s", in.Name, circuit.Name)
+		if ok {
+			if err := ensurePortValue(in, value, circuit.Name); err != nil {
+				return nil, err
+			}
+			env[in.Name] = cloneValue(value)
 		}
-		if err := ensurePortValue(in, value, circuit.Name); err != nil {
-			return nil, err
-		}
-		env[in.Name] = cloneValue(value)
 	}
 
 	modulesByName := make(map[string]*Circuit)
@@ -181,7 +188,12 @@ func evaluate(project *Project, circuit *Circuit, inputs map[string]Value, scope
 		}
 
 		if !progress {
-			return nil, unresolvedError(circuit, next, env)
+			for _, op := range next {
+				for _, out := range op.Outputs {
+					env[out] = errValue(op)
+				}
+			}
+			break
 		}
 		pending = next
 	}
@@ -193,15 +205,16 @@ func evaluate(project *Project, circuit *Circuit, inputs map[string]Value, scope
 	for _, out := range circuit.Outputs {
 		value, ok := env[out.Name]
 		if !ok {
-			return nil, fmt.Errorf("output %s was never driven in module %s", out.Name, circuit.Name)
-		}
-		if err := ensurePortValue(out, value, circuit.Name); err != nil {
-			return nil, err
+			value = errValue()
 		}
 		outputs[out.Name] = cloneValue(value)
 	}
 
 	return outputs, nil
+}
+
+func errValue(ops ...Operation) Value {
+	return Value{Kind: SignalErr}
 }
 
 func applyOperation(op Operation, env map[string]Value, circuit *Circuit, modules map[string]*Circuit, project *Project, scope string) (bool, error) {
@@ -228,14 +241,16 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 		if !ok {
 			right, ok := env[op.Inputs[1]]
 			if !ok {
-				return false, nil
+				env[op.Outputs[0]] = errValue(op)
+				return true, nil
 			}
 			value, applied, err := shortCircuitGate(op, right, circuit)
 			if err != nil {
 				return false, err
 			}
 			if !applied {
-				return false, nil
+				env[op.Outputs[0]] = errValue(op)
+				return true, nil
 			}
 			env[op.Outputs[0]] = value
 			if err := inferSignalPort(circuit, op.Outputs[0], value); err != nil {
@@ -250,7 +265,8 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 				return false, err
 			}
 			if !applied {
-				return false, nil
+				env[op.Outputs[0]] = errValue(op)
+				return true, nil
 			}
 			env[op.Outputs[0]] = value
 			if err := inferSignalPort(circuit, op.Outputs[0], value); err != nil {
@@ -282,7 +298,8 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 	case "NOT":
 		input, ok := env[op.Inputs[0]]
 		if !ok {
-			return false, nil
+			env[op.Outputs[0]] = errValue(op)
+			return true, nil
 		}
 		if input.Kind != SignalBits {
 			return false, fmt.Errorf("gate %s in module %s only supports bit signals", op.Name, circuit.Name)
@@ -301,7 +318,8 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 	case "BUF":
 		input, ok := env[op.Inputs[0]]
 		if !ok {
-			return false, nil
+			env[op.Outputs[0]] = errValue(op)
+			return true, nil
 		}
 		env[op.Outputs[0]] = cloneValue(input)
 		if err := inferSignalPort(circuit, op.Outputs[0], input); err != nil {
@@ -312,7 +330,10 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 	case "SPLIT":
 		source, ok := env[op.Inputs[0]]
 		if !ok {
-			return false, nil
+			for _, output := range op.Outputs {
+				env[output] = errValue(op)
+			}
+			return true, nil
 		}
 		if source.Kind != SignalBits {
 			return false, fmt.Errorf("split in module %s only supports bit signals", circuit.Name)
@@ -327,15 +348,21 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 
 	case "JOIN":
 		bits := make([]bool, len(op.Inputs))
+		allDone := true
 		for i, inputName := range op.Inputs {
 			input, ok := env[inputName]
 			if !ok {
-				return false, nil
+				allDone = false
+				continue
 			}
 			if input.Kind != SignalBits || len(input.Bits) != 1 {
 				return false, fmt.Errorf("join in module %s only accepts 1-bit inputs", circuit.Name)
 			}
 			bits[i] = input.Bits[0]
+		}
+		if !allDone {
+			env[op.Outputs[0]] = errValue(op)
+			return true, nil
 		}
 		value := Value{Kind: SignalBits, Bits: bits}
 		env[op.Outputs[0]] = value
@@ -355,16 +382,25 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 			return false, fmt.Errorf("module %s instance %s expected %d signals, got %d", child.Name, op.Name, expectedSignals, len(op.Signals))
 		}
 		childInputs := make(map[string]Value, len(sources))
+		allReady := true
 		for i, in := range sources {
 			parentSignal := op.Signals[i]
 			value, ok := env[parentSignal]
 			if !ok {
-				return false, nil
+				allReady = false
+				continue
 			}
 			if err := ensurePortValue(in, value, child.Name); err != nil {
 				return false, fmt.Errorf("module %s instance %s using %s: %w", child.Name, op.Name, parentSignal, err)
 			}
 			childInputs[in.Name] = cloneValue(value)
+		}
+		if !allReady {
+			for i := range child.Outputs {
+				parentSignal := op.Signals[len(sources)+i]
+				env[parentSignal] = errValue(op)
+			}
+			return true, nil
 		}
 		childOutputs, err := evaluate(project, child, childInputs, childScope(scope, op))
 		if err != nil {
@@ -540,17 +576,22 @@ func parseSimulationCommand(text string, declared map[string]Port, clocks map[st
 		}
 		return simulationCommand{kind: simulationCommandStop}, nil
 	case "set":
-		if len(fields) < 3 {
-			return simulationCommand{}, fmt.Errorf("usage: set <signal> <value>")
+		if len(fields) < 2 {
+			return simulationCommand{}, fmt.Errorf("usage: set <signal> [<value>]")
 		}
-		return buildSetCommand(fields[1], strings.Join(fields[2:], " "), declared)
+		rawValue := ""
+		if len(fields) >= 3 {
+			rawValue = strings.Join(fields[2:], " ")
+		}
+		return buildSetCommand(fields[1], rawValue, declared)
 	case "clock":
 		return parseClockCommand(fields, clocks)
 	default:
 		if len(fields) < 2 {
 			return simulationCommand{}, fmt.Errorf("unknown command %q", fields[0])
 		}
-		return buildSetCommand(fields[0], strings.Join(fields[1:], " "), declared)
+		rawValue := strings.Join(fields[1:], " ")
+		return buildSetCommand(fields[0], rawValue, declared)
 	}
 }
 
@@ -605,6 +646,9 @@ func buildSetCommand(name, rawValue string, declared map[string]Port) (simulatio
 	port, ok := declared[name]
 	if !ok {
 		return simulationCommand{}, fmt.Errorf("unknown source signal %s", name)
+	}
+	if rawValue == "" {
+		return simulationCommand{kind: simulationCommandSet, port: port, value: errValue()}, nil
 	}
 	value, err := parseValue(rawValue, port)
 	if err != nil {
@@ -780,13 +824,13 @@ func readInput(reader *bufio.Reader, output io.Writer, port Port) (Value, error)
 func inputPrompt(port Port) string {
 	switch port.Kind {
 	case SignalBits:
-		return fmt.Sprintf("%s[%d] (binary): ", port.Name, port.Width)
+		return fmt.Sprintf("%s[%d] (binary, optional): ", port.Name, port.Width)
 	case SignalRGB:
-		return fmt.Sprintf("%s (r,g,b each 0-255 or 8-bit binary): ", port.Name)
+		return fmt.Sprintf("%s (r,g,b each 0-255 or 8-bit binary, optional): ", port.Name)
 	case SignalBW:
-		return fmt.Sprintf("%s (bw 0-255 or 8-bit binary): ", port.Name)
+		return fmt.Sprintf("%s (bw 0-255 or 8-bit binary, optional): ", port.Name)
 	default:
-		return fmt.Sprintf("%s: ", port.Name)
+		return fmt.Sprintf("%s (optional): ", port.Name)
 	}
 }
 
@@ -917,6 +961,8 @@ func formatValue(value Value) string {
 		return fmt.Sprintf("%d,%d,%d", value.Channels[0], value.Channels[1], value.Channels[2])
 	case SignalBW:
 		return fmt.Sprintf("%d", value.Channels[0])
+	case SignalErr:
+		return "err"
 	default:
 		return ""
 	}
@@ -970,7 +1016,7 @@ func ReadInputFile(circuit *Circuit, path string) (map[string]Value, error) {
 
 	for _, in := range ports {
 		if _, ok := inputs[in.Name]; !ok {
-			return nil, fmt.Errorf("%s: missing input %s", path, in.Name)
+			inputs[in.Name] = errValue()
 		}
 	}
 
@@ -997,6 +1043,9 @@ func WriteOutputFile(circuit *Circuit, path string, outputs map[string]Value) er
 }
 
 func ensurePortValue(port Port, value Value, moduleName string) error {
+	if value.Kind == SignalErr {
+		return nil
+	}
 	if value.Kind != port.Kind {
 		return fmt.Errorf("signal %s in module %s expected %s, got %s", port.Name, moduleName, port.Kind, value.Kind)
 	}

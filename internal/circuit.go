@@ -6,6 +6,7 @@ const (
 	SignalBits SignalKind = "bits"
 	SignalRGB  SignalKind = "rgb"
 	SignalBW   SignalKind = "bw"
+	SignalErr  SignalKind = "err"
 )
 
 type Port struct {
