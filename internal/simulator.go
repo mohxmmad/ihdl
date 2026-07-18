@@ -237,13 +237,19 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 		return true, nil
 
 	case "AND", "OR":
-		left, ok := env[op.Inputs[0]]
-		if !ok {
-			right, ok := env[op.Inputs[1]]
-			if !ok {
-				env[op.Outputs[0]] = errValue(op)
-				return true, nil
-			}
+		left, leftOk := env[op.Inputs[0]]
+		right, rightOk := env[op.Inputs[1]]
+		if leftOk && left.Kind != SignalBits {
+			leftOk = false
+		}
+		if rightOk && right.Kind != SignalBits {
+			rightOk = false
+		}
+		if !leftOk && !rightOk {
+			env[op.Outputs[0]] = errValue(op)
+			return true, nil
+		}
+		if !leftOk {
 			value, applied, err := shortCircuitGate(op, right, circuit)
 			if err != nil {
 				return false, err
@@ -258,8 +264,7 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 			}
 			return true, nil
 		}
-		right, ok := env[op.Inputs[1]]
-		if !ok {
+		if !rightOk {
 			value, applied, err := shortCircuitGate(op, left, circuit)
 			if err != nil {
 				return false, err
@@ -273,9 +278,6 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 				return false, err
 			}
 			return true, nil
-		}
-		if left.Kind != SignalBits || right.Kind != SignalBits {
-			return false, fmt.Errorf("gate %s in module %s only supports bit signals", op.Name, circuit.Name)
 		}
 		if len(left.Bits) != len(right.Bits) {
 			return false, fmt.Errorf("gate %s in module %s has mismatched input widths", op.Name, circuit.Name)
@@ -297,7 +299,7 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 
 	case "NOT":
 		input, ok := env[op.Inputs[0]]
-		if !ok {
+		if !ok || input.Kind != SignalBits {
 			env[op.Outputs[0]] = errValue(op)
 			return true, nil
 		}
@@ -317,7 +319,7 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 
 	case "BUF":
 		input, ok := env[op.Inputs[0]]
-		if !ok {
+		if !ok || input.Kind == SignalErr {
 			env[op.Outputs[0]] = errValue(op)
 			return true, nil
 		}
@@ -329,7 +331,7 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 
 	case "SPLIT":
 		source, ok := env[op.Inputs[0]]
-		if !ok {
+		if !ok || source.Kind != SignalBits {
 			for _, output := range op.Outputs {
 				env[output] = errValue(op)
 			}
@@ -351,12 +353,9 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 		allDone := true
 		for i, inputName := range op.Inputs {
 			input, ok := env[inputName]
-			if !ok {
+			if !ok || input.Kind != SignalBits || len(input.Bits) != 1 {
 				allDone = false
 				continue
-			}
-			if input.Kind != SignalBits || len(input.Bits) != 1 {
-				return false, fmt.Errorf("join in module %s only accepts 1-bit inputs", circuit.Name)
 			}
 			bits[i] = input.Bits[0]
 		}
@@ -386,7 +385,7 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 		for i, in := range sources {
 			parentSignal := op.Signals[i]
 			value, ok := env[parentSignal]
-			if !ok {
+			if !ok || value.Kind == SignalErr {
 				allReady = false
 				continue
 			}

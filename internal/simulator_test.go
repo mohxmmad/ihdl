@@ -96,6 +96,48 @@ func TestEvaluateShortCircuitGatesWithUndefinedInputs(t *testing.T) {
 	}
 }
 
+func TestGateWithExplicitErrInput(t *testing.T) {
+	circ := &Circuit{
+		Name:    "Top",
+		Inputs:  []Port{{Name: "A", Kind: SignalBits, Width: 1}, {Name: "B", Kind: SignalBits, Width: 1}},
+		Outputs: []Port{{Name: "O1", Kind: SignalBits, Width: 1}, {Name: "O2", Kind: SignalBits, Width: 1}},
+		Signals: map[string]Port{"A": {Name: "A", Kind: SignalBits, Width: 1}, "B": {Name: "B", Kind: SignalBits, Width: 1}, "O1": {Name: "O1", Kind: SignalBits, Width: 1}, "O2": {Name: "O2", Kind: SignalBits, Width: 1}},
+		Ops: []Operation{
+			{Kind: "AND", Name: "G1", Inputs: []string{"A", "B"}, Outputs: []string{"O1"}},
+			{Kind: "OR", Name: "G2", Inputs: []string{"A", "B"}, Outputs: []string{"O2"}},
+		},
+	}
+	proj := &Project{Entry: circ, Circuits: map[string]*Circuit{"Top": circ}}
+
+	outputs, err := Evaluate(proj, circ, map[string]Value{
+		"A": {Kind: SignalErr},
+		"B": {Kind: SignalBits, Bits: []bool{false}},
+	})
+	if err != nil {
+		t.Fatalf("evaluate with err input: %v", err)
+	}
+	if got := formatValue(outputs["O1"]); got != "0" {
+		t.Fatalf("AND(err,0): expected 0, got %s", got)
+	}
+	if got := formatValue(outputs["O2"]); got != "err" {
+		t.Fatalf("OR(err,0): expected err, got %s", got)
+	}
+
+	outputs, err = Evaluate(proj, circ, map[string]Value{
+		"A": {Kind: SignalErr},
+		"B": {Kind: SignalBits, Bits: []bool{true}},
+	})
+	if err != nil {
+		t.Fatalf("evaluate with err input: %v", err)
+	}
+	if got := formatValue(outputs["O1"]); got != "err" {
+		t.Fatalf("AND(err,1): expected err, got %s", got)
+	}
+	if got := formatValue(outputs["O2"]); got != "1" {
+		t.Fatalf("OR(err,1): expected 1, got %s", got)
+	}
+}
+
 func TestEvaluateSplitAndConstants(t *testing.T) {
 	project := &Project{
 		Circuits: map[string]*Circuit{},
