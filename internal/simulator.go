@@ -466,6 +466,9 @@ func unresolvedError(circuit *Circuit, pending []Operation, env map[string]Value
 }
 
 func inferSignalPort(circuit *Circuit, name string, value Value) error {
+	if value.Kind == SignalErr {
+		return nil
+	}
 	port := portFromValue(name, value)
 	return registerSignal(circuit.Signals, port)
 }

@@ -644,6 +644,32 @@ func TestWireStateNotSavedForErrValues(t *testing.T) {
 	}
 }
 
+func TestErrPropagatesThroughModuleUse(t *testing.T) {
+	child := &Circuit{
+		Name:    "Child",
+		Inputs:  []Port{{Name: "X", Kind: SignalBits, Width: 1}},
+		Outputs: []Port{{Name: "Y", Kind: SignalBits, Width: 1}},
+		Signals: map[string]Port{"X": {Name: "X", Kind: SignalBits, Width: 1}, "Y": {Name: "Y", Kind: SignalBits, Width: 1}},
+		Ops:     []Operation{{Kind: "NOT", Name: "N1", Inputs: []string{"X"}, Outputs: []string{"Y"}}},
+	}
+	parent := &Circuit{
+		Name:    "Top",
+		Inputs:  []Port{{Name: "A", Kind: SignalBits, Width: 1}},
+		Outputs: []Port{{Name: "Q", Kind: SignalBits, Width: 1}},
+		Signals: map[string]Port{"A": {Name: "A", Kind: SignalBits, Width: 1}, "W": {Name: "W", Kind: SignalBits, Width: 1}, "Q": {Name: "Q", Kind: SignalBits, Width: 1}},
+		Ops:     []Operation{{Kind: "USE", Name: "U1", Module: "Child", Signals: []string{"W", "Q"}}},
+	}
+	proj := &Project{Entry: parent, Circuits: map[string]*Circuit{"Child": child, "Top": parent}}
+
+	outputs, err := Evaluate(proj, parent, map[string]Value{"A": {Kind: SignalBits, Bits: []bool{true}}})
+	if err != nil {
+		t.Fatalf("expected err to propagate without type mismatch, got: %v", err)
+	}
+	if got := formatValue(outputs["Q"]); got != "err" {
+		t.Fatalf("expected Q=err from missing child input, got %s", got)
+	}
+}
+
 func TestDisplayDefaultsUndrivenPixelsToBlack(t *testing.T) {
 	project := &Project{
 		Circuits: map[string]*Circuit{},
