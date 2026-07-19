@@ -566,6 +566,84 @@ func TestDisplayRendersRGBAndBWSignals(t *testing.T) {
 	}
 }
 
+func TestWireStatePersistsAcrossEvaluations(t *testing.T) {
+	circ := &Circuit{
+		Name:    "Feedback",
+		Inputs:  []Port{{Name: "A", Kind: SignalBits, Width: 1}},
+		Outputs: []Port{{Name: "OUT", Kind: SignalBits, Width: 1}},
+		Wires:   []Port{{Name: "FB", Kind: SignalBits, Width: 1}},
+		Signals: map[string]Port{
+			"A":   {Name: "A", Kind: SignalBits, Width: 1},
+			"OUT": {Name: "OUT", Kind: SignalBits, Width: 1},
+			"FB":  {Name: "FB", Kind: SignalBits, Width: 1},
+		},
+		Ops: []Operation{
+			{Kind: "AND", Name: "G1", Inputs: []string{"A", "FB"}, Outputs: []string{"OUT"}},
+			{Kind: "BUF", Name: "B1", Inputs: []string{"OUT"}, Outputs: []string{"FB"}},
+		},
+	}
+	proj := &Project{Entry: circ, Circuits: map[string]*Circuit{"Feedback": circ}}
+
+	outputs, err := Evaluate(proj, circ, map[string]Value{"A": {Kind: SignalBits, Bits: []bool{false}}})
+	if err != nil {
+		t.Fatalf("first eval: %v", err)
+	}
+	if got := formatValue(outputs["OUT"]); got != "0" {
+		t.Fatalf("first eval: expected OUT=0, got %s", got)
+	}
+
+	fb, ok := proj.WireState["Feedback"]["FB"]
+	if !ok || formatValue(fb) != "0" {
+		t.Fatalf("expected FB=0 in WireState, got %v", fb)
+	}
+
+	outputs, err = Evaluate(proj, circ, map[string]Value{"A": {Kind: SignalBits, Bits: []bool{true}}})
+	if err != nil {
+		t.Fatalf("second eval: %v", err)
+	}
+	if got := formatValue(outputs["OUT"]); got != "0" {
+		t.Fatalf("second eval: expected OUT=0 (via wire state), got %s; without wire state AND(1,X) would be err", got)
+	}
+}
+
+func TestWireStateNotSavedForErrValues(t *testing.T) {
+	circ := &Circuit{
+		Name:    "Stuck",
+		Inputs:  []Port{{Name: "A", Kind: SignalBits, Width: 1}},
+		Outputs: []Port{{Name: "OUT", Kind: SignalBits, Width: 1}},
+		Wires:   []Port{{Name: "W", Kind: SignalBits, Width: 1}},
+		Signals: map[string]Port{
+			"A":   {Name: "A", Kind: SignalBits, Width: 1},
+			"OUT": {Name: "OUT", Kind: SignalBits, Width: 1},
+			"W":   {Name: "W", Kind: SignalBits, Width: 1},
+		},
+		Ops: []Operation{
+			{Kind: "AND", Name: "G1", Inputs: []string{"A", "W"}, Outputs: []string{"OUT"}},
+		},
+	}
+	proj := &Project{Entry: circ, Circuits: map[string]*Circuit{"Stuck": circ}}
+
+	outputs, err := Evaluate(proj, circ, map[string]Value{"A": {Kind: SignalBits, Bits: []bool{true}}})
+	if err != nil {
+		t.Fatalf("eval with A=1 (stuck): %v", err)
+	}
+	if got := formatValue(outputs["OUT"]); got != "err" {
+		t.Fatalf("expected OUT=err for stuck circuit, got %s", got)
+	}
+
+	if _, ok := proj.WireState["Stuck"]["W"]; ok {
+		t.Fatalf("expected WireState to NOT save wire W (it was err)")
+	}
+
+	outputs, err = Evaluate(proj, circ, map[string]Value{"A": {Kind: SignalBits, Bits: []bool{false}}})
+	if err != nil {
+		t.Fatalf("eval with A=0: %v", err)
+	}
+	if got := formatValue(outputs["OUT"]); got != "0" {
+		t.Fatalf("expected OUT=0 after A=0 short-circuit, got %s", got)
+	}
+}
+
 func TestDisplayDefaultsUndrivenPixelsToBlack(t *testing.T) {
 	project := &Project{
 		Circuits: map[string]*Circuit{},

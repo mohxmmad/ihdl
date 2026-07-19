@@ -165,6 +165,18 @@ func evaluate(project *Project, circuit *Circuit, inputs map[string]Value, scope
 		}
 	}
 
+	if project.WireState != nil {
+		if wireValues, ok := project.WireState[scope]; ok {
+			for _, wire := range circuit.Wires {
+				if value, ok := wireValues[wire.Name]; ok {
+					if _, exists := env[wire.Name]; !exists {
+						env[wire.Name] = cloneValue(value)
+					}
+				}
+			}
+		}
+	}
+
 	modulesByName := make(map[string]*Circuit)
 	for _, imported := range project.Circuits {
 		modulesByName[imported.Name] = imported
@@ -196,6 +208,18 @@ func evaluate(project *Project, circuit *Circuit, inputs map[string]Value, scope
 			break
 		}
 		pending = next
+	}
+
+	if project.WireState == nil {
+		project.WireState = make(map[string]map[string]Value)
+	}
+	if project.WireState[scope] == nil {
+		project.WireState[scope] = make(map[string]Value)
+	}
+	for _, wire := range circuit.Wires {
+		if value, ok := env[wire.Name]; ok && value.Kind != SignalErr {
+			project.WireState[scope][wire.Name] = cloneValue(value)
+		}
 	}
 
 	outputs := make(map[string]Value, len(circuit.Outputs))
