@@ -42,6 +42,8 @@ func simulateWithIO(project *Project, options SimulationOptions, input io.Reader
 				return err
 			}
 			inputs[port.Name] = value
+		} else {
+			inputs[port.Name] = errValue()
 		}
 	}
 	for _, port := range project.Entry.Clocks {
