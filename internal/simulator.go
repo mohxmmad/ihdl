@@ -391,7 +391,11 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 			parentSignal := op.Signals[i]
 			value, ok := env[parentSignal]
 			if !ok {
-				return false, nil
+				if noOpProduces(parentSignal, circuit) {
+					value = errValue()
+				} else {
+					return false, nil
+				}
 			}
 			if err := ensurePortValue(in, value, child.Name); err != nil {
 				return false, fmt.Errorf("module %s instance %s using %s: %w", child.Name, op.Name, parentSignal, err)
@@ -1058,6 +1062,17 @@ func ensurePortValue(port Port, value Value, moduleName string) error {
 		return fmt.Errorf("signal %s in module %s expected bw pixel", port.Name, moduleName)
 	}
 	return nil
+}
+
+func noOpProduces(name string, circuit *Circuit) bool {
+	for _, op := range circuit.Ops {
+		for _, out := range op.Outputs {
+			if out == name {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func portFromValue(name string, value Value) Port {
