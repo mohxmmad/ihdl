@@ -148,6 +148,7 @@ Notes:
 - both `AND` inputs must have the same width
 - both `OR` inputs must have the same width
 - `NOT` preserves width
+- `AND` and `OR` use **short-circuit evaluation**: if one input determines the result regardless of the other, the gate resolves even when the other input is unknown or an error (e.g. `AND(X, 0)` → `0`, `OR(X, 1)` → `1`)
 
 ## 7. Constants
 
@@ -247,6 +248,8 @@ Signal order is:
 2. all child `CLOCK`s in declaration order
 3. all child `OUTPUT`s in declaration order
 
+Short-circuit evaluation works through module boundaries: if a sub-module input is unknown or missing but the output is determined by other inputs (e.g. `AND(err, 0)` inside the child), the module resolves correctly instead of propagating an error.
+
 Example with clock:
 
 ```ihdl
@@ -310,6 +313,8 @@ go run ./cmd/ihdl examples/and.ihdl
 
 The simulator asks for initial values once, then keeps running until you enter `stop`.
 
+Skipping a signal (pressing Enter without a value) marks it as unknown/`err`. The simulator will still try to resolve outputs through short-circuit evaluation where possible.
+
 After startup you can use:
 
 - `set <signal> <value>` to change one source signal and immediately recompute outputs
@@ -319,6 +324,13 @@ After startup you can use:
 - `clock step <clock> half` to advance one half cycle manually
 - `clock step <clock> full` to advance two half cycles manually
 - `show` to recompute and print outputs again without changing inputs
+
+Output values appear as:
+- `0` / `1` for bit signals
+- binary strings for bit buses (e.g. `1010`)
+- `r,g,b` tuples for RGB pixels
+- decimal or binary for BW pixels
+- `err` for unresolved or unknown signals
 - `stop` to end the simulation session
 
 If the module declares a `DISPLAY`, iHDL also starts a local viewer window in your browser and refreshes the rendered frame after each change.
@@ -515,3 +527,4 @@ You can build larger structures like `3x3` grids by composing row or cell module
 - no pixel arithmetic or pixel logic operations yet
 - `AND`, `OR`, `NOT`, `HIGH`, `LOW`, `SPLIT` are bit-only
 - pixels are currently routed with `BUF` and modules
+- no sequential/stateful elements (no flip-flops, no latches)
