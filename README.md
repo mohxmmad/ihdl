@@ -101,11 +101,44 @@ Clock is declared separately:
 CLOCK CLK
 ```
 
+Clocks behave as source signals (like `INPUT`) but can be toggled during interactive simulation to drive sequential logic.
+
 Rules:
 
 - clock must be 1 bit
-- clock is read as a source signal during simulation
-- clock behavior is currently manual and combinational-only during simulation
+- clock is prompted at startup alongside `INPUT` ports (can be set to `0`, `1`, or skipped as `err`)
+- clocks appear in module signal order for `USE` (after `INPUT`s, before `OUTPUT`s)
+
+### Clock modes
+
+Three modes control a clock during interactive simulation:
+
+- **Manual** (default): the clock holds its initial value until you toggle it
+- **Auto**: the clock toggles automatically at a given frequency
+- **Step**: advance one half or full cycle manually
+
+### Step a clock
+
+```text
+clock step CLK half    # toggle once (0→1 or 1→0)
+clock step CLK full    # toggle twice (back to original value)
+```
+
+`half` advances one half-cycle (toggles the bit). `full` completes a full cycle (toggles twice, returning to the original value). After stepping, all outputs are recomputed.
+
+### Auto clock
+
+```text
+clock auto CLK 0.5     # toggle every 0.5 seconds
+```
+
+The clock toggles automatically at the given frequency (in Hz). Each half-cycle toggle triggers a full recomputation of all outputs. Auto-ticking continues until you stop it.
+
+### Stop auto clock
+
+```text
+clock manual CLK       # stop auto ticking, return to manual control
+```
 
 ## 6. Gates
 
@@ -287,7 +320,62 @@ AndGate A1 A B TEMP1
 AndGate A2 TEMP1 C OUT
 ```
 
-## 12. Running the Simulator
+### Wire state persistence
+
+Wires remember their last computed value across evaluations. This enables feedback loops where a wire's value from the previous evaluation is available if the operations driving it haven't resolved yet.
+
+Example feedback loop:
+
+```ihdl
+WIRE FB
+AND G1 A FB OUT
+BUF B1 OUT FB
+```
+
+On the first evaluation, `FB` has no value so `AND G1` defers. After `OUT` is resolved, `FB` gets the value of `OUT` and is saved. On the next evaluation, `FB` starts with its saved value, allowing `AND G1` to potentially resolve immediately.
+
+Rules:
+
+- only non-`err` wire values are saved
+- input and clock values are never remembered across evaluations — they're always provided by the user or caller
+- wire state is scoped per module instance, so different instantiations of the same module have independent wire state
+
+## 12. Evaluation Model
+
+### Multi-pass resolution
+
+The simulator evaluates all operations in repeated passes until no progress is made:
+
+1. Each pass tries every pending operation
+2. Operations whose inputs are all ready produce outputs and are consumed
+3. Operations with missing inputs stay pending for the next pass
+4. When a pass makes no progress, all remaining pending outputs become `err`
+
+This allows chains of dependent operations to resolve across multiple passes without requiring a specific declaration order.
+
+### Short-circuit evaluation
+
+`AND` and `OR` gates attempt short-circuit evaluation: if one input is available (even as `err`) and determines the result, the gate resolves immediately:
+
+- `AND(err, 0)` → `0`
+- `AND(err, 1)` → `err` (uncertain, stays pending → becomes `err`)
+- `OR(err, 1)` → `1`
+- `OR(err, 0)` → `err`
+
+Short-circuit evaluation works through module boundaries: when a sub-module input is `err` or missing (no operation produces it), the simulator passes `err` as the child input and lets the child's own short-circuit evaluation handle it.
+
+### Unresolved signals
+
+Any signal that cannot be resolved after all passes is displayed as `err`:
+
+- skipped input ports
+- wires declared but never assigned
+- operations whose other inputs are also `err`
+- feedback loops that never stabilize
+
+Wire state persistence (Section 11) can help certain feedback patterns stabilize across evaluations. Running `show` or triggering a clock step re-evaluates all operations, which may resolve signals that were `err` in a previous run.
+
+## 13. Running the Simulator
 
 ### Build the binary
 
@@ -324,6 +412,7 @@ After startup you can use:
 - `clock step <clock> half` to advance one half cycle manually
 - `clock step <clock> full` to advance two half cycles manually
 - `show` to recompute and print outputs again without changing inputs
+- `stop` to end the simulation session
 
 Output values appear as:
 - `0` / `1` for bit signals
@@ -331,7 +420,6 @@ Output values appear as:
 - `r,g,b` tuples for RGB pixels
 - decimal or binary for BW pixels
 - `err` for unresolved or unknown signals
-- `stop` to end the simulation session
 
 If the module declares a `DISPLAY`, iHDL also starts a local viewer window in your browser and refreshes the rendered frame after each change.
 
@@ -393,7 +481,7 @@ GitHub releases include prebuilt binaries for:
 
 Run them the same way as the examples above, replacing the local build name with the downloaded binary name.
 
-## 13. `.iinp` Format
+## 14. `.iinp` Format
 
 One source signal per line:
 
@@ -415,7 +503,7 @@ Rules:
 - BW values can be decimal `0..255`
 - BW values can also be 8-bit binary
 
-## 14. `.iout` Format
+## 15. `.iout` Format
 
 One output per line:
 
@@ -426,7 +514,7 @@ PX_OUT 255,64,0
 BW_OUT 170
 ```
 
-## 15. Example Modules
+## 16. Example Modules
 
 ### AND gate
 
@@ -521,7 +609,7 @@ RGBPassthrough C3 P3 L3 O3 B3
 
 You can build larger structures like `3x3` grids by composing row or cell modules the same way.
 
-## 16. Current Limitations
+## 17. Current Limitations
 
 - no direct bit indexing like `DATA[0]`
 - no pixel arithmetic or pixel logic operations yet
