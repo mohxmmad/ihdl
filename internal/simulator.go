@@ -388,7 +388,7 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 		for i, in := range sources {
 			parentSignal := op.Signals[i]
 			value, ok := env[parentSignal]
-			if !ok || value.Kind == SignalErr {
+			if !ok {
 				return false, nil
 			}
 			if err := ensurePortValue(in, value, child.Name); err != nil {

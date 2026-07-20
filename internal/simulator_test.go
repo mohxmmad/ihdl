@@ -670,6 +670,46 @@ func TestErrPropagatesThroughModuleUse(t *testing.T) {
 	}
 }
 
+func TestUsePassesErrToChildAndShortCircuits(t *testing.T) {
+	child := &Circuit{
+		Name:    "Child",
+		Inputs:  []Port{{Name: "A", Kind: SignalBits, Width: 1}, {Name: "B", Kind: SignalBits, Width: 1}},
+		Outputs: []Port{{Name: "O", Kind: SignalBits, Width: 1}},
+		Signals: map[string]Port{"A": {Name: "A", Kind: SignalBits, Width: 1}, "B": {Name: "B", Kind: SignalBits, Width: 1}, "O": {Name: "O", Kind: SignalBits, Width: 1}},
+		Ops:     []Operation{{Kind: "AND", Name: "G1", Inputs: []string{"A", "B"}, Outputs: []string{"O"}}},
+	}
+	parent := &Circuit{
+		Name:    "Top",
+		Inputs:  []Port{{Name: "X", Kind: SignalBits, Width: 1}, {Name: "Y", Kind: SignalBits, Width: 1}},
+		Outputs: []Port{{Name: "Q", Kind: SignalBits, Width: 1}},
+		Signals: map[string]Port{"X": {Name: "X", Kind: SignalBits, Width: 1}, "Y": {Name: "Y", Kind: SignalBits, Width: 1}, "Q": {Name: "Q", Kind: SignalBits, Width: 1}},
+		Ops:     []Operation{{Kind: "USE", Name: "U1", Module: "Child", Signals: []string{"X", "Y", "Q"}}},
+	}
+	proj := &Project{Entry: parent, Circuits: map[string]*Circuit{"Child": child, "Top": parent}}
+
+	outputs, err := Evaluate(proj, parent, map[string]Value{
+		"X": {Kind: SignalErr},
+		"Y": {Kind: SignalBits, Bits: []bool{false}},
+	})
+	if err != nil {
+		t.Fatalf("evaluate with err child input: %v", err)
+	}
+	if got := formatValue(outputs["Q"]); got != "0" {
+		t.Fatalf("AND(err,0) via USE: expected 0, got %s", got)
+	}
+
+	outputs, err = Evaluate(proj, parent, map[string]Value{
+		"X": {Kind: SignalErr},
+		"Y": {Kind: SignalBits, Bits: []bool{true}},
+	})
+	if err != nil {
+		t.Fatalf("evaluate with err child input: %v", err)
+	}
+	if got := formatValue(outputs["Q"]); got != "err" {
+		t.Fatalf("AND(err,1) via USE: expected err, got %s", got)
+	}
+}
+
 func TestDisplayDefaultsUndrivenPixelsToBlack(t *testing.T) {
 	project := &Project{
 		Circuits: map[string]*Circuit{},
