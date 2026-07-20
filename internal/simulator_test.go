@@ -710,6 +710,41 @@ func TestUsePassesErrToChildAndShortCircuits(t *testing.T) {
 	}
 }
 
+func TestUseShortCircuitsWithNeverSetWire(t *testing.T) {
+	child := &Circuit{
+		Name:    "Child",
+		Inputs:  []Port{{Name: "A", Kind: SignalBits, Width: 1}, {Name: "B", Kind: SignalBits, Width: 1}},
+		Outputs: []Port{{Name: "O", Kind: SignalBits, Width: 1}},
+		Signals: map[string]Port{"A": {Name: "A", Kind: SignalBits, Width: 1}, "B": {Name: "B", Kind: SignalBits, Width: 1}, "O": {Name: "O", Kind: SignalBits, Width: 1}},
+		Ops:     []Operation{{Kind: "AND", Name: "G1", Inputs: []string{"A", "B"}, Outputs: []string{"O"}}},
+	}
+	parent := &Circuit{
+		Name:    "Top",
+		Inputs:  []Port{{Name: "X", Kind: SignalBits, Width: 1}},
+		Outputs: []Port{{Name: "Q", Kind: SignalBits, Width: 1}},
+		Wires:   []Port{{Name: "W", Kind: SignalBits, Width: 1}},
+		Signals: map[string]Port{"X": {Name: "X", Kind: SignalBits, Width: 1}, "W": {Name: "W", Kind: SignalBits, Width: 1}, "Q": {Name: "Q", Kind: SignalBits, Width: 1}},
+		Ops:     []Operation{{Kind: "USE", Name: "U1", Module: "Child", Signals: []string{"W", "X", "Q"}}},
+	}
+	proj := &Project{Entry: parent, Circuits: map[string]*Circuit{"Child": child, "Top": parent}}
+
+	outputs, err := Evaluate(proj, parent, map[string]Value{"X": {Kind: SignalBits, Bits: []bool{false}}})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if got := formatValue(outputs["Q"]); got != "0" {
+		t.Fatalf("AND(never-set-wire,0) via USE: expected 0, got %s", got)
+	}
+
+	outputs, err = Evaluate(proj, parent, map[string]Value{"X": {Kind: SignalBits, Bits: []bool{true}}})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if got := formatValue(outputs["Q"]); got != "err" {
+		t.Fatalf("AND(never-set-wire,1) via USE: expected err, got %s", got)
+	}
+}
+
 func TestDisplayDefaultsUndrivenPixelsToBlack(t *testing.T) {
 	project := &Project{
 		Circuits: map[string]*Circuit{},
