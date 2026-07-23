@@ -745,6 +745,27 @@ func TestUseShortCircuitsWithNeverSetWire(t *testing.T) {
 	}
 }
 
+func TestSplitHandlesErrInput(t *testing.T) {
+	circ := &Circuit{
+		Name:    "Top",
+		Inputs:  []Port{{Name: "BUS", Kind: SignalBits, Width: 3}},
+		Outputs: []Port{{Name: "B0", Kind: SignalBits, Width: 1}, {Name: "B1", Kind: SignalBits, Width: 1}, {Name: "B2", Kind: SignalBits, Width: 1}},
+		Signals: map[string]Port{"BUS": {Name: "BUS", Kind: SignalBits, Width: 3}, "B0": {Name: "B0", Kind: SignalBits, Width: 1}, "B1": {Name: "B1", Kind: SignalBits, Width: 1}, "B2": {Name: "B2", Kind: SignalBits, Width: 1}},
+		Ops:     []Operation{{Kind: "SPLIT", Inputs: []string{"BUS"}, Outputs: []string{"B0", "B1", "B2"}}},
+	}
+	proj := &Project{Entry: circ, Circuits: map[string]*Circuit{"Top": circ}}
+
+	outputs, err := Evaluate(proj, circ, map[string]Value{"BUS": {Kind: SignalErr}})
+	if err != nil {
+		t.Fatalf("evaluate split with err input: %v", err)
+	}
+	for _, name := range []string{"B0", "B1", "B2"} {
+		if outputs[name].Kind != SignalErr {
+			t.Fatalf("expected %s=err when split input is err, got %s", name, formatValue(outputs[name]))
+		}
+	}
+}
+
 func TestDisplayDefaultsUndrivenPixelsToBlack(t *testing.T) {
 	project := &Project{
 		Circuits: map[string]*Circuit{},
