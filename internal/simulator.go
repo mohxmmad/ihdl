@@ -349,7 +349,16 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 
 	case "SPLIT":
 		source, ok := env[op.Inputs[0]]
-		if !ok || source.Kind != SignalBits {
+		if !ok {
+			return false, nil
+		}
+		if source.Kind == SignalErr {
+			for _, output := range op.Outputs {
+				env[output] = Value{Kind: SignalErr}
+			}
+			return true, nil
+		}
+		if source.Kind != SignalBits {
 			return false, nil
 		}
 		if len(source.Bits) != len(op.Outputs) {
