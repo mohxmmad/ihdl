@@ -355,7 +355,7 @@ func TestInteractiveSimulationRunsUntilStopAndUpdatesOutputs(t *testing.T) {
 	if !strings.Contains(text, "OUT = 1") {
 		t.Fatalf("expected live update to OUT = 1, got output %q", text)
 	}
-	if !strings.Contains(text, "Command (set <signal> <value> | press <button> | release <button> | clock <auto|manual|step> ... | show | stop):") {
+	if !strings.Contains(text, "Command (set <signal> <value> | tap <button> | clock <auto|manual|step> ... | show | stop):") {
 		t.Fatalf("expected persistent command prompt, got output %q", text)
 	}
 }
@@ -868,7 +868,7 @@ func TestGridCanBePlacedIntoDisplay(t *testing.T) {
 	}
 }
 
-func TestButtonPressAndReleaseUpdatesEightBitSignal(t *testing.T) {
+func TestButtonTapSetsThenAutoClearsEightBitSignal(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "buttons.ihdl")
 	data := strings.Join([]string{
 		"MODULE Buttons",
@@ -885,17 +885,17 @@ func TestButtonPressAndReleaseUpdatesEightBitSignal(t *testing.T) {
 		t.Fatalf("parse: %v", err)
 	}
 
-	input := bytes.NewBufferString("A\nrelease KEY_A\nstop\n")
+	input := bytes.NewBufferString("tap A\nshow\nstop\n")
 	var output bytes.Buffer
 	if err := simulateWithIO(project, SimulationOptions{}, input, &output); err != nil {
 		t.Fatalf("simulate: %v", err)
 	}
 	text := output.String()
 	if !strings.Contains(text, "OUT = 01000001") {
-		t.Fatalf("expected pressed button output, got %q", text)
+		t.Fatalf("expected tapped button output, got %q", text)
 	}
-	if strings.Count(text, "OUT = 00000000") < 2 {
-		t.Fatalf("expected zero output before and after release, got %q", text)
+	if !strings.Contains(text, "OUT = 00000000") {
+		t.Fatalf("expected auto-cleared output after tap, got %q", text)
 	}
 }
 

@@ -29,6 +29,7 @@ func simulateWithIO(project *Project, options SimulationOptions, input io.Reader
 	clocks := make(map[string]Port, len(project.Entry.Clocks))
 	buttons := make(map[string]Button, len(project.Entry.Buttons))
 	buttonLookup := make(map[string]string, len(project.Entry.Buttons)*2)
+	tappedButtons := make(map[string]bool)
 
 	for _, port := range ports {
 		declared[port.Name] = port
@@ -95,18 +96,13 @@ func simulateWithIO(project *Project, options SimulationOptions, input io.Reader
 				return nil
 			case simulationCommandSet:
 				inputs[command.port.Name] = command.value
-			case simulationCommandButtonPress:
+			case simulationCommandButtonTap:
 				if err := setButtonInput(inputs, buttons, command.buttonName, true); err != nil {
 					fmt.Fprintf(output, "%v\n", err)
 					printSimulationPrompt(output)
 					continue
 				}
-			case simulationCommandButtonRelease:
-				if err := setButtonInput(inputs, buttons, command.buttonName, false); err != nil {
-					fmt.Fprintf(output, "%v\n", err)
-					printSimulationPrompt(output)
-					continue
-				}
+				tappedButtons[command.buttonName] = true
 			case simulationCommandClockAuto:
 				if err := setClockAuto(clockStates, command.clockName, command.frequencyHz, time.Now()); err != nil {
 					fmt.Fprintf(output, "%v\n", err)
@@ -126,6 +122,7 @@ func simulateWithIO(project *Project, options SimulationOptions, input io.Reader
 					printSimulationPrompt(output)
 					continue
 				}
+				clearTappedButtons(tappedButtons, inputs)
 				rerender = false
 			}
 
@@ -134,6 +131,7 @@ func simulateWithIO(project *Project, options SimulationOptions, input io.Reader
 				if err != nil {
 					return err
 				}
+				clearTappedButtons(tappedButtons, inputs)
 			}
 			printSimulationPrompt(output)
 
@@ -143,6 +141,7 @@ func simulateWithIO(project *Project, options SimulationOptions, input io.Reader
 				if err != nil {
 					return err
 				}
+				clearTappedButtons(tappedButtons, inputs)
 				printSimulationPrompt(output)
 			}
 		}
@@ -613,14 +612,13 @@ func signalPort(circuit *Circuit, name string) (Port, error) {
 type simulationCommandKind string
 
 const (
-	simulationCommandShow          simulationCommandKind = "show"
-	simulationCommandSet           simulationCommandKind = "set"
-	simulationCommandStop          simulationCommandKind = "stop"
-	simulationCommandButtonPress   simulationCommandKind = "button_press"
-	simulationCommandButtonRelease simulationCommandKind = "button_release"
-	simulationCommandClockAuto     simulationCommandKind = "clock_auto"
-	simulationCommandClockManual   simulationCommandKind = "clock_manual"
-	simulationCommandClockStep     simulationCommandKind = "clock_step"
+	simulationCommandShow        simulationCommandKind = "show"
+	simulationCommandSet         simulationCommandKind = "set"
+	simulationCommandStop        simulationCommandKind = "stop"
+	simulationCommandButtonTap   simulationCommandKind = "button_tap"
+	simulationCommandClockAuto   simulationCommandKind = "clock_auto"
+	simulationCommandClockManual simulationCommandKind = "clock_manual"
+	simulationCommandClockStep   simulationCommandKind = "clock_step"
 )
 
 type clockMode string
@@ -686,11 +684,11 @@ func evaluateAndRenderStep(project *Project, options SimulationOptions, inputs m
 func parseSimulationCommand(text string, declared map[string]Port, clocks map[string]Port, buttons map[string]string) (simulationCommand, error) {
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" {
-		return simulationCommand{}, fmt.Errorf("enter 'set <signal> <value>', 'press <button>', 'release <button>', 'clock <auto|manual|step> ...', 'show', or 'stop'")
+		return simulationCommand{}, fmt.Errorf("enter 'set <signal> <value>', 'tap <button>', 'clock <auto|manual|step> ...', 'show', or 'stop'")
 	}
 	fields := strings.Fields(trimmed)
 	if len(fields) == 0 {
-		return simulationCommand{}, fmt.Errorf("enter 'set <signal> <value>', 'press <button>', 'release <button>', 'clock <auto|manual|step> ...', 'show', or 'stop'")
+		return simulationCommand{}, fmt.Errorf("enter 'set <signal> <value>', 'tap <button>', 'clock <auto|manual|step> ...', 'show', or 'stop'")
 	}
 
 	switch strings.ToLower(fields[0]) {
@@ -713,21 +711,16 @@ func parseSimulationCommand(text string, declared map[string]Port, clocks map[st
 			rawValue = strings.Join(fields[2:], " ")
 		}
 		return buildSetCommand(fields[1], rawValue, declared)
-	case "press":
+	case "tap":
 		if len(fields) != 2 {
-			return simulationCommand{}, fmt.Errorf("usage: press <button>")
+			return simulationCommand{}, fmt.Errorf("usage: tap <button>")
 		}
-		return buildButtonCommand(simulationCommandButtonPress, fields[1], buttons)
-	case "release":
-		if len(fields) != 2 {
-			return simulationCommand{}, fmt.Errorf("usage: release <button>")
-		}
-		return buildButtonCommand(simulationCommandButtonRelease, fields[1], buttons)
+		return buildButtonCommand(simulationCommandButtonTap, fields[1], buttons)
 	case "clock":
 		return parseClockCommand(fields, clocks)
 	default:
 		if len(fields) == 1 {
-			if command, err := buildButtonCommand(simulationCommandButtonPress, fields[0], buttons); err == nil {
+			if command, err := buildButtonCommand(simulationCommandButtonTap, fields[0], buttons); err == nil {
 				return command, nil
 			}
 			return simulationCommand{}, fmt.Errorf("unknown command %q", fields[0])
@@ -955,7 +948,7 @@ func readSimulationLines(reader *bufio.Reader, lines chan<- simulationLine) {
 }
 
 func printSimulationPrompt(output io.Writer) {
-	fmt.Fprint(output, "\nCommand (set <signal> <value> | press <button> | release <button> | clock <auto|manual|step> ... | show | stop): ")
+	fmt.Fprint(output, "\nCommand (set <signal> <value> | tap <button> | clock <auto|manual|step> ... | show | stop): ")
 }
 
 func readInput(reader *bufio.Reader, output io.Writer, port Port) (Value, error) {
@@ -1282,4 +1275,13 @@ func setButtonInput(inputs map[string]Value, buttons map[string]Button, name str
 	}
 	inputs[name] = Value{Kind: SignalBits, Bits: bits}
 	return nil
+}
+
+func clearTappedButtons(tapped map[string]bool, inputs map[string]Value) {
+	for name := range tapped {
+		inputs[name] = Value{Kind: SignalBits, Bits: make([]bool, 8)}
+	}
+	for name := range tapped {
+		delete(tapped, name)
+	}
 }

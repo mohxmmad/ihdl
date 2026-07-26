@@ -252,18 +252,20 @@ Rules:
 Interactive commands:
 
 ```text
-press A
-release A
-press ENTER
-press DOWN
+tap A
+tap ENTER
+tap DOWN
 ```
 
-In interactive simulation, `press` and `release` accept either the signal name or the explicit key name.
+`tap` sets the button's 8-bit value, advances one simulation step, and then immediately clears the button back to `00000000` (momentary / pulse behavior).
 
 If a button name/key is unique, you can also enter it directly as a shortcut:
 
 ```text
 ENTER
+```
+
+This is equivalent to `tap ENTER`.
 ```
 
 ## 6. Gates
