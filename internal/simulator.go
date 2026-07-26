@@ -33,28 +33,29 @@ func simulateWithIO(project *Project, options SimulationOptions, input io.Reader
 
 	for _, port := range ports {
 		declared[port.Name] = port
-		if button, ok := buttonByName(project.Entry, port.Name); ok {
-			buttons[button.Name] = button
-			buttonLookup[normalizeButtonKey(button.Name)] = button.Name
-			buttonLookup[button.Key] = button.Name
-			inputs[port.Name] = Value{Kind: SignalBits, Bits: make([]bool, 8)}
-		} else {
-			fmt.Fprint(output, inputPrompt(port))
-			text, err := reader.ReadString('\n')
+		fmt.Fprint(output, inputPrompt(port))
+		text, err := reader.ReadString('\n')
+		if err != nil {
+			return err
+		}
+		trimmed := strings.TrimSpace(text)
+		if trimmed != "" {
+			value, err := parseValue(trimmed, port)
 			if err != nil {
 				return err
 			}
-			trimmed := strings.TrimSpace(text)
-			if trimmed != "" {
-				value, err := parseValue(trimmed, port)
-				if err != nil {
-					return err
-				}
-				inputs[port.Name] = value
-			} else {
-				inputs[port.Name] = errValue()
-			}
+			inputs[port.Name] = value
+		} else {
+			inputs[port.Name] = errValue()
 		}
+	}
+	for _, btn := range project.Entry.Buttons {
+		port := Port{Name: btn.Name, Kind: SignalBits, Width: 8}
+		declared[btn.Name] = port
+		buttons[btn.Name] = btn
+		buttonLookup[normalizeButtonKey(btn.Name)] = btn.Name
+		buttonLookup[btn.Key] = btn.Name
+		inputs[btn.Name] = Value{Kind: SignalBits, Bits: make([]bool, 8)}
 	}
 	for _, port := range project.Entry.Clocks {
 		clocks[port.Name] = port
@@ -184,6 +185,14 @@ func evaluate(project *Project, circuit *Circuit, inputs map[string]Value, scope
 				return nil, err
 			}
 			env[in.Name] = cloneValue(value)
+		}
+	}
+	for _, btn := range circuit.Buttons {
+		value, ok := inputs[btn.Name]
+		if ok {
+			env[btn.Name] = cloneValue(value)
+		} else {
+			env[btn.Name] = Value{Kind: SignalBits, Bits: make([]bool, 8)}
 		}
 	}
 
@@ -1120,9 +1129,18 @@ func formatValue(value Value) string {
 
 func allDeclaredSourcePorts(circuit *Circuit) []Port {
 	ports := make([]Port, 0, len(circuit.Inputs)+len(circuit.Clocks))
-	ports = append(ports, circuit.Inputs...)
+	for _, p := range circuit.Inputs {
+		if !isButtonSignal(circuit, p.Name) {
+			ports = append(ports, p)
+		}
+	}
 	ports = append(ports, circuit.Clocks...)
 	return ports
+}
+
+func isButtonSignal(circuit *Circuit, name string) bool {
+	_, ok := buttonByName(circuit, name)
+	return ok
 }
 
 func buttonByName(circuit *Circuit, name string) (Button, bool) {
