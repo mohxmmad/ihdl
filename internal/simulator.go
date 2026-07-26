@@ -23,27 +23,36 @@ func SimulateWithOptions(project *Project, options SimulationOptions) error {
 func simulateWithIO(project *Project, options SimulationOptions, input io.Reader, output io.Writer) error {
 	reader := bufio.NewReader(input)
 	var viewer *displayViewer
-	ports := allSourcePorts(project.Entry)
+	ports := allDeclaredSourcePorts(project.Entry)
 	inputs := make(map[string]Value, len(ports))
 	declared := make(map[string]Port, len(ports))
 	clocks := make(map[string]Port, len(project.Entry.Clocks))
+	buttons := make(map[string]Button, len(project.Entry.Buttons))
+	buttonLookup := make(map[string]string, len(project.Entry.Buttons)*2)
 
 	for _, port := range ports {
 		declared[port.Name] = port
-		fmt.Fprint(output, inputPrompt(port))
-		text, err := reader.ReadString('\n')
-		if err != nil {
-			return err
-		}
-		trimmed := strings.TrimSpace(text)
-		if trimmed != "" {
-			value, err := parseValue(trimmed, port)
+		if button, ok := buttonByName(project.Entry, port.Name); ok {
+			buttons[button.Name] = button
+			buttonLookup[normalizeButtonKey(button.Name)] = button.Name
+			buttonLookup[button.Key] = button.Name
+			inputs[port.Name] = Value{Kind: SignalBits, Bits: make([]bool, 8)}
+		} else {
+			fmt.Fprint(output, inputPrompt(port))
+			text, err := reader.ReadString('\n')
 			if err != nil {
 				return err
 			}
-			inputs[port.Name] = value
-		} else {
-			inputs[port.Name] = errValue()
+			trimmed := strings.TrimSpace(text)
+			if trimmed != "" {
+				value, err := parseValue(trimmed, port)
+				if err != nil {
+					return err
+				}
+				inputs[port.Name] = value
+			} else {
+				inputs[port.Name] = errValue()
+			}
 		}
 	}
 	for _, port := range project.Entry.Clocks {
@@ -73,7 +82,7 @@ func simulateWithIO(project *Project, options SimulationOptions, input io.Reader
 				return line.err
 			}
 
-			command, err := parseSimulationCommand(line.text, declared, clocks)
+			command, err := parseSimulationCommand(line.text, declared, clocks, buttonLookup)
 			if err != nil {
 				fmt.Fprintf(output, "%v\n", err)
 				printSimulationPrompt(output)
@@ -86,6 +95,18 @@ func simulateWithIO(project *Project, options SimulationOptions, input io.Reader
 				return nil
 			case simulationCommandSet:
 				inputs[command.port.Name] = command.value
+			case simulationCommandButtonPress:
+				if err := setButtonInput(inputs, buttons, command.buttonName, true); err != nil {
+					fmt.Fprintf(output, "%v\n", err)
+					printSimulationPrompt(output)
+					continue
+				}
+			case simulationCommandButtonRelease:
+				if err := setButtonInput(inputs, buttons, command.buttonName, false); err != nil {
+					fmt.Fprintf(output, "%v\n", err)
+					printSimulationPrompt(output)
+					continue
+				}
 			case simulationCommandClockAuto:
 				if err := setClockAuto(clockStates, command.clockName, command.frequencyHz, time.Now()); err != nil {
 					fmt.Fprintf(output, "%v\n", err)
@@ -157,7 +178,7 @@ func Evaluate(project *Project, circuit *Circuit, inputs map[string]Value) (map[
 
 func evaluate(project *Project, circuit *Circuit, inputs map[string]Value, scope string) (map[string]Value, error) {
 	env := make(map[string]Value)
-	for _, in := range allSourcePorts(circuit) {
+	for _, in := range allDeclaredSourcePorts(circuit) {
 		value, ok := inputs[in.Name]
 		if ok {
 			if err := ensurePortValue(in, value, circuit.Name); err != nil {
@@ -204,12 +225,20 @@ func evaluate(project *Project, circuit *Circuit, inputs map[string]Value, scope
 		if !progress {
 			for _, op := range next {
 				for _, out := range op.Outputs {
-					env[out] = errValue(op)
+					env[out] = errValue()
 				}
 			}
 			break
 		}
 		pending = next
+	}
+
+	for _, out := range circuit.Outputs {
+		if out.Kind == SignalGrid {
+			if _, ok := env[out.Name]; !ok {
+				env[out.Name] = zeroGridValue(out.GridW, out.GridH)
+			}
+		}
 	}
 
 	if project.WireState == nil {
@@ -237,10 +266,6 @@ func evaluate(project *Project, circuit *Circuit, inputs map[string]Value, scope
 	}
 
 	return outputs, nil
-}
-
-func errValue(ops ...Operation) Value {
-	return Value{Kind: SignalErr}
 }
 
 func applyOperation(op Operation, env map[string]Value, circuit *Circuit, modules map[string]*Circuit, project *Project, scope string) (bool, error) {
@@ -341,10 +366,51 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 		if !ok || input.Kind == SignalErr {
 			return false, nil
 		}
-		env[op.Outputs[0]] = cloneValue(input)
-		if err := inferSignalPort(circuit, op.Outputs[0], input); err != nil {
+		outPort, hasPort := circuit.Signals[op.Outputs[0]]
+		if hasPort && input.Kind != outPort.Kind && CompatibleKinds(input.Kind, outPort.Kind) {
+			converted, err := ConvertValue(input, outPort.Kind)
+			if err != nil {
+				return false, fmt.Errorf("buf %s in module %s: %w", op.Name, circuit.Name, err)
+			}
+			env[op.Outputs[0]] = converted
+			if err := inferSignalPort(circuit, op.Outputs[0], converted); err != nil {
+				return false, err
+			}
+		} else {
+			env[op.Outputs[0]] = cloneValue(input)
+			if err := inferSignalPort(circuit, op.Outputs[0], input); err != nil {
+				return false, err
+			}
+		}
+		return true, nil
+
+	case "PIXEL":
+		targetPort, err := signalPort(circuit, op.Outputs[0])
+		if err != nil {
 			return false, err
 		}
+		if targetPort.Kind != SignalGrid {
+			return false, fmt.Errorf("pixel target %s in module %s must be a grid", targetPort.Name, circuit.Name)
+		}
+		grid := ensureGridValue(env, targetPort)
+		input, ok := env[op.Inputs[0]]
+		if !ok {
+			if noOpProduces(op.Inputs[0], circuit) {
+				env[targetPort.Name] = grid
+				return true, nil
+			}
+			return false, nil
+		}
+		if input.Kind == SignalErr {
+			env[targetPort.Name] = grid
+			return true, nil
+		}
+		rgb, err := valueToRGB(input)
+		if err != nil {
+			return false, fmt.Errorf("grid %s in module %s pixel %d,%d: %w", targetPort.Name, circuit.Name, op.X, op.Y, err)
+		}
+		setGridPixel(&grid, op.X, op.Y, rgb)
+		env[targetPort.Name] = grid
 		return true, nil
 
 	case "SPLIT":
@@ -355,6 +421,22 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 		if source.Kind == SignalErr {
 			for _, output := range op.Outputs {
 				env[output] = Value{Kind: SignalErr}
+			}
+			return true, nil
+		}
+		if source.Kind == SignalBW {
+			if len(op.Outputs) != 1 {
+				return false, fmt.Errorf("split on BW pixel in module %s needs exactly 1 output", circuit.Name)
+			}
+			env[op.Outputs[0]] = Value{Kind: SignalBits, Bits: channelToBits(source.Channels[0])}
+			return true, nil
+		}
+		if source.Kind == SignalRGB {
+			if len(op.Outputs) != 3 {
+				return false, fmt.Errorf("split on RGB pixel in module %s needs exactly 3 outputs", circuit.Name)
+			}
+			for i, output := range op.Outputs {
+				env[output] = Value{Kind: SignalBits, Bits: channelToBits(source.Channels[i])}
 			}
 			return true, nil
 		}
@@ -370,6 +452,30 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 		return true, nil
 
 	case "JOIN":
+		outPort, hasPort := circuit.Signals[op.Outputs[0]]
+		if hasPort && (outPort.Kind == SignalBW || outPort.Kind == SignalRGB) {
+			channels := make([]uint8, 0, 3)
+			for _, inputName := range op.Inputs {
+				input, ok := env[inputName]
+				if !ok || input.Kind != SignalBits {
+					return false, nil
+				}
+				if len(input.Bits) != 8 {
+					return false, fmt.Errorf("join in module %s needs 8-bit bus inputs for pixel output, got %d bits", circuit.Name, len(input.Bits))
+				}
+				v, err := bitsToChannel(input.Bits)
+				if err != nil {
+					return false, fmt.Errorf("join in module %s: %w", circuit.Name, err)
+				}
+				channels = append(channels, v)
+			}
+			value := Value{Kind: outPort.Kind, Channels: channels}
+			env[op.Outputs[0]] = value
+			if err := inferSignalPort(circuit, op.Outputs[0], value); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
 		bits := make([]bool, len(op.Inputs))
 		for i, inputName := range op.Inputs {
 			input, ok := env[inputName]
@@ -390,7 +496,7 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 		if !ok {
 			return false, fmt.Errorf("module %s not found for %s", op.Module, circuit.Name)
 		}
-		sources := allSourcePorts(child)
+		sources := allDeclaredSourcePorts(child)
 		expectedSignals := len(sources) + len(child.Outputs)
 		if len(op.Signals) != expectedSignals {
 			return false, fmt.Errorf("module %s instance %s expected %d signals, got %d", child.Name, op.Name, expectedSignals, len(op.Signals))
@@ -409,7 +515,15 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 			if err := ensurePortValue(in, value, child.Name); err != nil {
 				return false, fmt.Errorf("module %s instance %s using %s: %w", child.Name, op.Name, parentSignal, err)
 			}
-			childInputs[in.Name] = cloneValue(value)
+			converted := value
+			if value.Kind != in.Kind && CompatibleKinds(value.Kind, in.Kind) {
+				var err error
+				converted, err = ConvertValue(value, in.Kind)
+				if err != nil {
+					return false, fmt.Errorf("module %s instance %s converting %s: %w", child.Name, op.Name, parentSignal, err)
+				}
+			}
+			childInputs[in.Name] = cloneValue(converted)
 		}
 		childOutputs, err := evaluate(project, child, childInputs, childScope(scope, op))
 		if err != nil {
@@ -499,12 +613,14 @@ func signalPort(circuit *Circuit, name string) (Port, error) {
 type simulationCommandKind string
 
 const (
-	simulationCommandShow        simulationCommandKind = "show"
-	simulationCommandSet         simulationCommandKind = "set"
-	simulationCommandStop        simulationCommandKind = "stop"
-	simulationCommandClockAuto   simulationCommandKind = "clock_auto"
-	simulationCommandClockManual simulationCommandKind = "clock_manual"
-	simulationCommandClockStep   simulationCommandKind = "clock_step"
+	simulationCommandShow          simulationCommandKind = "show"
+	simulationCommandSet           simulationCommandKind = "set"
+	simulationCommandStop          simulationCommandKind = "stop"
+	simulationCommandButtonPress   simulationCommandKind = "button_press"
+	simulationCommandButtonRelease simulationCommandKind = "button_release"
+	simulationCommandClockAuto     simulationCommandKind = "clock_auto"
+	simulationCommandClockManual   simulationCommandKind = "clock_manual"
+	simulationCommandClockStep     simulationCommandKind = "clock_step"
 )
 
 type clockMode string
@@ -518,6 +634,7 @@ type simulationCommand struct {
 	kind        simulationCommandKind
 	port        Port
 	value       Value
+	buttonName  string
 	clockName   string
 	frequencyHz float64
 	clockSteps  int
@@ -566,14 +683,14 @@ func evaluateAndRenderStep(project *Project, options SimulationOptions, inputs m
 	return viewer, nil
 }
 
-func parseSimulationCommand(text string, declared map[string]Port, clocks map[string]Port) (simulationCommand, error) {
+func parseSimulationCommand(text string, declared map[string]Port, clocks map[string]Port, buttons map[string]string) (simulationCommand, error) {
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" {
-		return simulationCommand{}, fmt.Errorf("enter 'set <signal> <value>', 'clock <auto|manual|step> ...', 'show', or 'stop'")
+		return simulationCommand{}, fmt.Errorf("enter 'set <signal> <value>', 'press <button>', 'release <button>', 'clock <auto|manual|step> ...', 'show', or 'stop'")
 	}
 	fields := strings.Fields(trimmed)
 	if len(fields) == 0 {
-		return simulationCommand{}, fmt.Errorf("enter 'set <signal> <value>', 'clock <auto|manual|step> ...', 'show', or 'stop'")
+		return simulationCommand{}, fmt.Errorf("enter 'set <signal> <value>', 'press <button>', 'release <button>', 'clock <auto|manual|step> ...', 'show', or 'stop'")
 	}
 
 	switch strings.ToLower(fields[0]) {
@@ -596,15 +713,39 @@ func parseSimulationCommand(text string, declared map[string]Port, clocks map[st
 			rawValue = strings.Join(fields[2:], " ")
 		}
 		return buildSetCommand(fields[1], rawValue, declared)
+	case "press":
+		if len(fields) != 2 {
+			return simulationCommand{}, fmt.Errorf("usage: press <button>")
+		}
+		return buildButtonCommand(simulationCommandButtonPress, fields[1], buttons)
+	case "release":
+		if len(fields) != 2 {
+			return simulationCommand{}, fmt.Errorf("usage: release <button>")
+		}
+		return buildButtonCommand(simulationCommandButtonRelease, fields[1], buttons)
 	case "clock":
 		return parseClockCommand(fields, clocks)
 	default:
+		if len(fields) == 1 {
+			if command, err := buildButtonCommand(simulationCommandButtonPress, fields[0], buttons); err == nil {
+				return command, nil
+			}
+			return simulationCommand{}, fmt.Errorf("unknown command %q", fields[0])
+		}
 		if len(fields) < 2 {
 			return simulationCommand{}, fmt.Errorf("unknown command %q", fields[0])
 		}
 		rawValue := strings.Join(fields[1:], " ")
 		return buildSetCommand(fields[0], rawValue, declared)
 	}
+}
+
+func buildButtonCommand(kind simulationCommandKind, identifier string, buttons map[string]string) (simulationCommand, error) {
+	name, ok := buttons[normalizeButtonKey(identifier)]
+	if !ok {
+		return simulationCommand{}, fmt.Errorf("unknown button %s", identifier)
+	}
+	return simulationCommand{kind: kind, buttonName: name}, nil
 }
 
 func parseClockCommand(fields []string, clocks map[string]Port) (simulationCommand, error) {
@@ -814,7 +955,7 @@ func readSimulationLines(reader *bufio.Reader, lines chan<- simulationLine) {
 }
 
 func printSimulationPrompt(output io.Writer) {
-	fmt.Fprint(output, "\nCommand (set <signal> <value> | clock <auto|manual|step> ... | show | stop): ")
+	fmt.Fprint(output, "\nCommand (set <signal> <value> | press <button> | release <button> | clock <auto|manual|step> ... | show | stop): ")
 }
 
 func readInput(reader *bufio.Reader, output io.Writer, port Port) (Value, error) {
@@ -841,6 +982,8 @@ func inputPrompt(port Port) string {
 		return fmt.Sprintf("%s (r,g,b each 0-255 or 8-bit binary, optional): ", port.Name)
 	case SignalBW:
 		return fmt.Sprintf("%s (bw 0-255 or 8-bit binary, optional): ", port.Name)
+	case SignalGrid:
+		return fmt.Sprintf("%s (grid %dx%d, optional): ", port.Name, port.GridW, port.GridH)
 	default:
 		return fmt.Sprintf("%s (optional): ", port.Name)
 	}
@@ -866,6 +1009,8 @@ func parseValue(text string, port Port) (Value, error) {
 			return Value{}, err
 		}
 		return Value{Kind: SignalBW, Channels: channels}, nil
+	case SignalGrid:
+		return Value{}, fmt.Errorf("grid values are not supported in text input")
 	}
 	return Value{}, fmt.Errorf("unsupported signal kind %s", port.Kind)
 }
@@ -980,15 +1125,20 @@ func formatValue(value Value) string {
 	}
 }
 
-func cloneValue(value Value) Value {
-	return Value{Kind: value.Kind, Bits: append([]bool(nil), value.Bits...), Channels: append([]uint8(nil), value.Channels...)}
-}
-
-func allSourcePorts(circuit *Circuit) []Port {
+func allDeclaredSourcePorts(circuit *Circuit) []Port {
 	ports := make([]Port, 0, len(circuit.Inputs)+len(circuit.Clocks))
 	ports = append(ports, circuit.Inputs...)
 	ports = append(ports, circuit.Clocks...)
 	return ports
+}
+
+func buttonByName(circuit *Circuit, name string) (Button, bool) {
+	for _, button := range circuit.Buttons {
+		if button.Name == name {
+			return button, true
+		}
+	}
+	return Button{}, false
 }
 
 func ReadInputFile(circuit *Circuit, path string) (map[string]Value, error) {
@@ -997,7 +1147,7 @@ func ReadInputFile(circuit *Circuit, path string) (map[string]Value, error) {
 		return nil, err
 	}
 
-	ports := allSourcePorts(circuit)
+	ports := allDeclaredSourcePorts(circuit)
 	inputs := make(map[string]Value, len(ports))
 	declared := make(map[string]Port, len(ports))
 	for _, in := range ports {
@@ -1059,7 +1209,24 @@ func ensurePortValue(port Port, value Value, moduleName string) error {
 		return nil
 	}
 	if value.Kind != port.Kind {
-		return fmt.Errorf("signal %s in module %s expected %s, got %s", port.Name, moduleName, port.Kind, value.Kind)
+		if !CompatibleKinds(value.Kind, port.Kind) {
+			return fmt.Errorf("signal %s in module %s expected %s, got %s", port.Name, moduleName, port.Kind, value.Kind)
+		}
+		if port.Kind == SignalBits {
+			if value.Kind == SignalBW && len(value.Channels) != 1 {
+				return fmt.Errorf("signal %s in module %s expected bits, got bw pixel", port.Name, moduleName)
+			}
+			if value.Kind == SignalRGB && len(value.Channels) != 3 {
+				return fmt.Errorf("signal %s in module %s expected bits, got rgb pixel", port.Name, moduleName)
+			}
+		}
+		if port.Kind == SignalBW && len(value.Bits) != 8 {
+			return fmt.Errorf("signal %s in module %s needs 8-bit bus for BW conversion", port.Name, moduleName)
+		}
+		if port.Kind == SignalRGB && len(value.Bits) != 24 {
+			return fmt.Errorf("signal %s in module %s needs 24-bit bus for RGB conversion", port.Name, moduleName)
+		}
+		return nil
 	}
 	if port.Kind == SignalBits && len(value.Bits) != port.Width {
 		return fmt.Errorf("signal %s in module %s expected %d bits", port.Name, moduleName, port.Width)
@@ -1069,6 +1236,14 @@ func ensurePortValue(port Port, value Value, moduleName string) error {
 	}
 	if port.Kind == SignalBW && len(value.Channels) != 1 {
 		return fmt.Errorf("signal %s in module %s expected bw pixel", port.Name, moduleName)
+	}
+	if port.Kind == SignalGrid {
+		if value.GridW != port.GridW || value.GridH != port.GridH {
+			return fmt.Errorf("signal %s in module %s expected grid %dx%d", port.Name, moduleName, port.GridW, port.GridH)
+		}
+		if len(value.Pixels) != port.GridW*port.GridH*3 {
+			return fmt.Errorf("signal %s in module %s expected grid pixel data", port.Name, moduleName)
+		}
 	}
 	return nil
 }
@@ -1089,5 +1264,22 @@ func portFromValue(name string, value Value) Port {
 	if value.Kind == SignalBits {
 		port.Width = len(value.Bits)
 	}
+	if value.Kind == SignalGrid {
+		port.GridW = value.GridW
+		port.GridH = value.GridH
+	}
 	return port
+}
+
+func setButtonInput(inputs map[string]Value, buttons map[string]Button, name string, pressed bool) error {
+	button, ok := buttons[name]
+	if !ok {
+		return fmt.Errorf("unknown button %s", name)
+	}
+	bits := make([]bool, 8)
+	if pressed {
+		copy(bits, button.Value)
+	}
+	inputs[name] = Value{Kind: SignalBits, Bits: bits}
+	return nil
 }

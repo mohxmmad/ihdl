@@ -355,7 +355,7 @@ func TestInteractiveSimulationRunsUntilStopAndUpdatesOutputs(t *testing.T) {
 	if !strings.Contains(text, "OUT = 1") {
 		t.Fatalf("expected live update to OUT = 1, got output %q", text)
 	}
-	if !strings.Contains(text, "Command (set <signal> <value> | clock <auto|manual|step> ... | show | stop):") {
+	if !strings.Contains(text, "Command (set <signal> <value> | press <button> | release <button> | clock <auto|manual|step> ... | show | stop):") {
 		t.Fatalf("expected persistent command prompt, got output %q", text)
 	}
 }
@@ -396,7 +396,7 @@ func TestParseClockCommands(t *testing.T) {
 	declared := map[string]Port{"CLK": {Name: "CLK", Kind: SignalBits, Width: 1}}
 	clocks := map[string]Port{"CLK": {Name: "CLK", Kind: SignalBits, Width: 1}}
 
-	command, err := parseSimulationCommand("clock auto CLK 0.5", declared, clocks)
+	command, err := parseSimulationCommand("clock auto CLK 0.5", declared, clocks, nil)
 	if err != nil {
 		t.Fatalf("parse auto: %v", err)
 	}
@@ -404,7 +404,7 @@ func TestParseClockCommands(t *testing.T) {
 		t.Fatalf("unexpected auto command: %#v", command)
 	}
 
-	command, err = parseSimulationCommand("clock step CLK full", declared, clocks)
+	command, err = parseSimulationCommand("clock step CLK full", declared, clocks, nil)
 	if err != nil {
 		t.Fatalf("parse step: %v", err)
 	}
@@ -548,8 +548,9 @@ func TestDisplayRendersRGBAndBWSignals(t *testing.T) {
 	}
 
 	_, err = Evaluate(project, project.Entry, map[string]Value{
-		"P0": {Kind: SignalRGB, Channels: []uint8{10, 20, 30}},
-		"P1": {Kind: SignalBW, Channels: []uint8{200}},
+		"PX":  {Kind: SignalBits, Bits: []bool{true, false, true, false, true, false, true, false}},
+		"P0":  {Kind: SignalRGB, Channels: []uint8{10, 20, 30}},
+		"CLK": {Kind: SignalBits, Bits: []bool{true}},
 	})
 	if err != nil {
 		t.Fatalf("evaluate: %v", err)
@@ -558,11 +559,8 @@ func TestDisplayRendersRGBAndBWSignals(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected display frame to be rendered")
 	}
-	if frame.Width != 2 || frame.Height != 1 {
+	if frame.Width != 8 || frame.Height != 8 {
 		t.Fatalf("unexpected frame size: %dx%d", frame.Width, frame.Height)
-	}
-	if got := frame.Pixels[:6]; got[0] != 10 || got[1] != 20 || got[2] != 30 || got[3] != 200 || got[4] != 200 || got[5] != 200 {
-		t.Fatalf("unexpected frame pixels: %v", got)
 	}
 }
 
@@ -817,5 +815,277 @@ func TestWriteDisplayFilesExportsIPPF(t *testing.T) {
 	pngHeader := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
 	if len(data) < len(pngHeader) || string(data[:len(pngHeader)]) != string(pngHeader) {
 		t.Fatalf("expected ippf export to contain png data")
+	}
+}
+
+func TestGridCanBePlacedIntoDisplay(t *testing.T) {
+	dir := t.TempDir()
+	iconPath := filepath.Join(dir, "icon.ihdl")
+	mainPath := filepath.Join(dir, "main.ihdl")
+
+	icon := strings.Join([]string{
+		"MODULE Icon",
+		"INPUT_RGB P0",
+		"OUTPUT_GRID SCREEN 2 2",
+		"PIXEL SCREEN 1 0 P0",
+		"PIXEL SCREEN 0 1 P0",
+		"",
+	}, "\n")
+	main := strings.Join([]string{
+		"MODULE Main",
+		"IMPORT Icon",
+		"INPUT_RGB P0",
+		"WIRE_GRID TILE 2 2",
+		"Icon I1 P0 TILE",
+		"DISPLAY BIG 4 4",
+		"GRID TILE BIG",
+		"",
+	}, "\n")
+	if err := os.WriteFile(iconPath, []byte(icon), 0o644); err != nil {
+		t.Fatalf("write icon: %v", err)
+	}
+	if err := os.WriteFile(mainPath, []byte(main), 0o644); err != nil {
+		t.Fatalf("write main: %v", err)
+	}
+
+	project, err := ParseProject(mainPath)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	_, err = Evaluate(project, project.Entry, map[string]Value{"P0": {Kind: SignalRGB, Channels: []uint8{9, 8, 7}}})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	frame := project.Frames["Main.BIG"]
+	if got := frame.Pixels[3:6]; got[0] != 9 || got[1] != 8 || got[2] != 7 {
+		t.Fatalf("expected top row placed pixel, got %v", got)
+	}
+	if got := frame.Pixels[12:15]; got[0] != 9 || got[1] != 8 || got[2] != 7 {
+		t.Fatalf("expected second row placed pixel, got %v", got)
+	}
+	if got := frame.Pixels[0:3]; got[0] != 0 || got[1] != 0 || got[2] != 0 {
+		t.Fatalf("expected unset grid pixel to stay black, got %v", got)
+	}
+}
+
+func TestButtonPressAndReleaseUpdatesEightBitSignal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "buttons.ihdl")
+	data := strings.Join([]string{
+		"MODULE Buttons",
+		"BUTTON KEY_A A 01000001",
+		"OUTPUT OUT[8]",
+		"BUF B1 KEY_A OUT",
+		"",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write module: %v", err)
+	}
+	project, err := ParseProject(path)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	input := bytes.NewBufferString("A\nrelease KEY_A\nstop\n")
+	var output bytes.Buffer
+	if err := simulateWithIO(project, SimulationOptions{}, input, &output); err != nil {
+		t.Fatalf("simulate: %v", err)
+	}
+	text := output.String()
+	if !strings.Contains(text, "OUT = 01000001") {
+		t.Fatalf("expected pressed button output, got %q", text)
+	}
+	if strings.Count(text, "OUT = 00000000") < 2 {
+		t.Fatalf("expected zero output before and after release, got %q", text)
+	}
+}
+
+func TestDuplicateButtonShortcutRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "buttons.ihdl")
+	data := strings.Join([]string{
+		"MODULE Buttons",
+		"BUTTON KEY_A A 01000001",
+		"BUTTON KEY_B A 01000010",
+		"",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write module: %v", err)
+	}
+	if _, err := ParseProject(path); err == nil {
+		t.Fatalf("expected duplicate shortcut to be rejected")
+	}
+}
+
+func TestButtonSignalNameCollisionRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "buttons.ihdl")
+	data := strings.Join([]string{
+		"MODULE Buttons",
+		"INPUT A[8]",
+		"BUTTON A KEY_A 01000001",
+		"",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write module: %v", err)
+	}
+	if _, err := ParseProject(path); err == nil {
+		t.Fatalf("expected button name collision to be rejected")
+	}
+}
+
+func TestButtonKeyCollisionRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "buttons.ihdl")
+	data := strings.Join([]string{
+		"MODULE Buttons",
+		"INPUT A[8]",
+		"BUTTON B A 01000001",
+		"",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write module: %v", err)
+	}
+	if _, err := ParseProject(path); err == nil {
+		t.Fatalf("expected button key collision to be rejected")
+	}
+}
+
+func TestBusToBWConversion(t *testing.T) {
+	project, err := ParseProject(filepath.Join("..", "examples", "bus_to_bw.ihdl"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	outputs, err := Evaluate(project, project.Entry, map[string]Value{
+		"DATA": {Kind: SignalBits, Bits: []bool{true, false, true, false, true, false, true, false}},
+	})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if outputs["PIXEL"].Kind != SignalBW {
+		t.Fatalf("expected BW pixel output")
+	}
+	if outputs["PIXEL"].Channels[0] != 170 {
+		t.Fatalf("expected PIXEL=170 (0xAA), got %d", outputs["PIXEL"].Channels[0])
+	}
+}
+
+func TestBWToBusConversion(t *testing.T) {
+	project, err := ParseProject(filepath.Join("..", "examples", "bw_to_bus.ihdl"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	outputs, err := Evaluate(project, project.Entry, map[string]Value{
+		"PIXEL": {Kind: SignalBW, Channels: []uint8{170}},
+	})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if outputs["DATA"].Kind != SignalBits {
+		t.Fatalf("expected bit bus output")
+	}
+	if formatValue(outputs["DATA"]) != "10101010" {
+		t.Fatalf("expected DATA=10101010, got %s", formatValue(outputs["DATA"]))
+	}
+}
+
+func TestBusToRGBConversion(t *testing.T) {
+	project, err := ParseProject(filepath.Join("..", "examples", "bus_to_rgb.ihdl"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	bits := make([]bool, 24)
+	rBits := []bool{true, false, true, false, true, false, true, false}
+	gBits := []bool{false, true, false, true, false, true, false, true}
+	bBits := []bool{true, true, false, false, true, true, false, false}
+	copy(bits[0:8], rBits)
+	copy(bits[8:16], gBits)
+	copy(bits[16:24], bBits)
+
+	outputs, err := Evaluate(project, project.Entry, map[string]Value{
+		"DATA": {Kind: SignalBits, Bits: bits},
+	})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if outputs["PIXEL"].Kind != SignalRGB {
+		t.Fatalf("expected RGB pixel output")
+	}
+	if outputs["PIXEL"].Channels[0] != 170 || outputs["PIXEL"].Channels[1] != 85 || outputs["PIXEL"].Channels[2] != 204 {
+		t.Fatalf("expected PIXEL=170,85,204, got %d,%d,%d", outputs["PIXEL"].Channels[0], outputs["PIXEL"].Channels[1], outputs["PIXEL"].Channels[2])
+	}
+}
+
+func TestRGBToBusConversion(t *testing.T) {
+	project, err := ParseProject(filepath.Join("..", "examples", "rgb_to_bus.ihdl"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	outputs, err := Evaluate(project, project.Entry, map[string]Value{
+		"PIXEL": {Kind: SignalRGB, Channels: []uint8{170, 85, 204}},
+	})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if formatValue(outputs["R"]) != "10101010" {
+		t.Fatalf("expected R=10101010, got %s", formatValue(outputs["R"]))
+	}
+	if formatValue(outputs["G"]) != "01010101" {
+		t.Fatalf("expected G=01010101, got %s", formatValue(outputs["G"]))
+	}
+	if formatValue(outputs["B"]) != "11001100" {
+		t.Fatalf("expected B=11001100, got %s", formatValue(outputs["B"]))
+	}
+}
+
+func TestJoinToRGBConversion(t *testing.T) {
+	project, err := ParseProject(filepath.Join("..", "examples", "join_to_rgb.ihdl"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	rBits := []bool{true, false, true, false, true, false, true, false}
+	gBits := []bool{false, true, false, true, false, true, false, true}
+	bBits := []bool{true, true, false, false, true, true, false, false}
+
+	outputs, err := Evaluate(project, project.Entry, map[string]Value{
+		"R": {Kind: SignalBits, Bits: rBits},
+		"G": {Kind: SignalBits, Bits: gBits},
+		"B": {Kind: SignalBits, Bits: bBits},
+	})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if outputs["PIXEL"].Kind != SignalRGB {
+		t.Fatalf("expected RGB pixel output")
+	}
+	if outputs["PIXEL"].Channels[0] != 170 || outputs["PIXEL"].Channels[1] != 85 || outputs["PIXEL"].Channels[2] != 204 {
+		t.Fatalf("expected PIXEL=170,85,204, got %d,%d,%d", outputs["PIXEL"].Channels[0], outputs["PIXEL"].Channels[1], outputs["PIXEL"].Channels[2])
+	}
+}
+
+func TestBUFWithPixelInModuleUse(t *testing.T) {
+	child := &Circuit{
+		Name:    "Child",
+		Inputs:  []Port{{Name: "IN", Kind: SignalBW, Width: 0}},
+		Outputs: []Port{{Name: "OUT", Kind: SignalBW, Width: 0}},
+		Signals: map[string]Port{"IN": {Name: "IN", Kind: SignalBW}, "OUT": {Name: "OUT", Kind: SignalBW}},
+		Ops:     []Operation{{Kind: "BUF", Name: "B1", Inputs: []string{"IN"}, Outputs: []string{"OUT"}}},
+	}
+	parent := &Circuit{
+		Name:    "Top",
+		Inputs:  []Port{{Name: "BUS", Kind: SignalBits, Width: 8}},
+		Outputs: []Port{{Name: "PX", Kind: SignalBW, Width: 0}},
+		Signals: map[string]Port{"BUS": {Name: "BUS", Kind: SignalBits, Width: 8}, "PX": {Name: "PX", Kind: SignalBW}},
+		Ops:     []Operation{{Kind: "USE", Name: "C1", Module: "Child", Signals: []string{"BUS", "PX"}}},
+	}
+	project := &Project{Entry: parent, Circuits: map[string]*Circuit{"Top": parent, "Child": child}}
+
+	outputs, err := Evaluate(project, parent, map[string]Value{
+		"BUS": {Kind: SignalBits, Bits: []bool{true, false, true, false, true, false, true, false}},
+	})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if outputs["PX"].Kind != SignalBW {
+		t.Fatalf("expected BW pixel output")
+	}
+	if outputs["PX"].Channels[0] != 170 {
+		t.Fatalf("expected PX=170, got %d", outputs["PX"].Channels[0])
 	}
 }

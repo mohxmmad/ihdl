@@ -48,11 +48,28 @@ func renderDisplays(project *Project, circuit *Circuit, env map[string]Value, sc
 			if !ok {
 				continue
 			}
+			if value.Kind == SignalErr {
+				continue
+			}
 			rgb, err := valueToRGB(value)
 			if err != nil {
 				return fmt.Errorf("display %s in module %s pixel %d,%d: %w", display.Name, circuit.Name, pixel.X, pixel.Y, err)
 			}
 			setFramePixel(&frame, pixel.X, pixel.Y, rgb)
+		}
+		for _, placement := range display.Grids {
+			value, ok := env[placement.GridName]
+			if !ok || value.Kind == SignalErr {
+				continue
+			}
+			if value.Kind != SignalGrid {
+				return fmt.Errorf("display %s in module %s grid %s: expected grid input", display.Name, circuit.Name, placement.GridName)
+			}
+			for y := 0; y < value.GridH; y++ {
+				for x := 0; x < value.GridW; x++ {
+					setFramePixel(&frame, placement.X+x, placement.Y+y, gridPixelAt(value, x, y))
+				}
+			}
 		}
 		project.Frames[displayFrameKey(scope, display.Name)] = frame
 	}
@@ -82,6 +99,29 @@ func setFramePixel(frame *DisplayFrame, x, y int, rgb [3]uint8) {
 	frame.Pixels[idx] = rgb[0]
 	frame.Pixels[idx+1] = rgb[1]
 	frame.Pixels[idx+2] = rgb[2]
+}
+
+func zeroGridValue(width, height int) Value {
+	return Value{Kind: SignalGrid, GridW: width, GridH: height, Pixels: make([]uint8, width*height*3)}
+}
+
+func ensureGridValue(env map[string]Value, port Port) Value {
+	if value, ok := env[port.Name]; ok && value.Kind == SignalGrid {
+		return cloneValue(value)
+	}
+	return zeroGridValue(port.GridW, port.GridH)
+}
+
+func setGridPixel(value *Value, x, y int, rgb [3]uint8) {
+	idx := (y*value.GridW + x) * 3
+	value.Pixels[idx] = rgb[0]
+	value.Pixels[idx+1] = rgb[1]
+	value.Pixels[idx+2] = rgb[2]
+}
+
+func gridPixelAt(value Value, x, y int) [3]uint8 {
+	idx := (y*value.GridW + x) * 3
+	return [3]uint8{value.Pixels[idx], value.Pixels[idx+1], value.Pixels[idx+2]}
 }
 
 func displayFrameKey(scope, name string) string {

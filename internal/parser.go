@@ -77,6 +77,7 @@ func loadCircuit(path string, registry map[string]*Circuit, loading map[string]b
 	}
 	importedModules := make(map[string]bool)
 	displayIndex := make(map[string]int)
+	buttonAliases := make(map[string]string)
 
 	lines := strings.Split(string(data), "\n")
 	for lineNo, raw := range lines {
@@ -133,6 +134,63 @@ func loadCircuit(path string, registry map[string]*Circuit, loading map[string]b
 				circuit.Wires = append(circuit.Wires, port)
 			}
 
+		case "INPUT_GRID", "OUTPUT_GRID", "WIRE_GRID":
+			if len(fields) != 4 {
+				return nil, fmt.Errorf("%s:%d: invalid %s", cleanPath, lineNo+1, fields[0])
+			}
+			port, target, err := parseGridDeclaration(fields[0], fields[1], fields[2], fields[3])
+			if err != nil {
+				return nil, fmt.Errorf("%s:%d: %w", cleanPath, lineNo+1, err)
+			}
+			if _, ok := displayIndex[port.Name]; ok {
+				return nil, fmt.Errorf("%s:%d: signal %s conflicts with display name", cleanPath, lineNo+1, port.Name)
+			}
+			if err := registerSignal(circuit.Signals, port); err != nil {
+				return nil, fmt.Errorf("%s:%d: %w", cleanPath, lineNo+1, err)
+			}
+			switch target {
+			case "input":
+				circuit.Inputs = append(circuit.Inputs, port)
+			case "output":
+				circuit.Outputs = append(circuit.Outputs, port)
+			case "wire":
+				circuit.Wires = append(circuit.Wires, port)
+			}
+
+		case "BUTTON":
+			button, port, err := parseButton(fields)
+			if err != nil {
+				return nil, fmt.Errorf("%s:%d: %w", cleanPath, lineNo+1, err)
+			}
+			if _, ok := circuit.Signals[port.Name]; ok {
+				return nil, fmt.Errorf("%s:%d: button %s conflicts with existing signal name", cleanPath, lineNo+1, port.Name)
+			}
+			if _, ok := displayIndex[port.Name]; ok {
+				return nil, fmt.Errorf("%s:%d: signal %s conflicts with display name", cleanPath, lineNo+1, port.Name)
+			}
+			if err := registerSignal(circuit.Signals, port); err != nil {
+				return nil, fmt.Errorf("%s:%d: %w", cleanPath, lineNo+1, err)
+			}
+			aliases := []string{normalizeButtonKey(button.Name), button.Key}
+			seen := make(map[string]struct{}, len(aliases))
+			for _, alias := range aliases {
+				if _, ok := seen[alias]; ok {
+					continue
+				}
+				seen[alias] = struct{}{}
+				if existing, ok := circuit.Signals[alias]; ok && existing.Name != button.Name {
+					return nil, fmt.Errorf("%s:%d: button shortcut %s conflicts with existing signal name %s", cleanPath, lineNo+1, alias, existing.Name)
+				}
+				if existing, ok := buttonAliases[alias]; ok && existing != button.Name {
+					return nil, fmt.Errorf("%s:%d: button shortcut %s already used by %s", cleanPath, lineNo+1, alias, existing)
+				}
+			}
+			for alias := range seen {
+				buttonAliases[alias] = button.Name
+			}
+			circuit.Inputs = append(circuit.Inputs, port)
+			circuit.Buttons = append(circuit.Buttons, button)
+
 		case "DISPLAY":
 			if len(fields) != 4 {
 				return nil, fmt.Errorf("%s:%d: invalid DISPLAY", cleanPath, lineNo+1)
@@ -154,24 +212,70 @@ func loadCircuit(path string, registry map[string]*Circuit, loading map[string]b
 			if len(fields) != 5 {
 				return nil, fmt.Errorf("%s:%d: invalid PIXEL", cleanPath, lineNo+1)
 			}
-			displayPos, ok := displayIndex[fields[1]]
-			if !ok {
-				return nil, fmt.Errorf("%s:%d: unknown display %s", cleanPath, lineNo+1, fields[1])
-			}
 			pixel, err := parseDisplayPixel(fields[2], fields[3], fields[4])
 			if err != nil {
 				return nil, fmt.Errorf("%s:%d: %w", cleanPath, lineNo+1, err)
 			}
-			display := &circuit.Displays[displayPos]
-			if pixel.X >= display.Width || pixel.Y >= display.Height {
-				return nil, fmt.Errorf("%s:%d: pixel (%d,%d) is outside display %s bounds %dx%d", cleanPath, lineNo+1, pixel.X, pixel.Y, display.Name, display.Width, display.Height)
+			if displayPos, ok := displayIndex[fields[1]]; ok {
+				display := &circuit.Displays[displayPos]
+				if pixel.X >= display.Width || pixel.Y >= display.Height {
+					return nil, fmt.Errorf("%s:%d: pixel (%d,%d) is outside display %s bounds %dx%d", cleanPath, lineNo+1, pixel.X, pixel.Y, display.Name, display.Width, display.Height)
+				}
+				for _, existing := range display.Pixels {
+					if existing.X == pixel.X && existing.Y == pixel.Y {
+						return nil, fmt.Errorf("%s:%d: duplicate pixel mapping for %s at (%d,%d)", cleanPath, lineNo+1, display.Name, pixel.X, pixel.Y)
+					}
+				}
+				display.Pixels = append(display.Pixels, pixel)
+				continue
 			}
-			for _, existing := range display.Pixels {
-				if existing.X == pixel.X && existing.Y == pixel.Y {
-					return nil, fmt.Errorf("%s:%d: duplicate pixel mapping for %s at (%d,%d)", cleanPath, lineNo+1, display.Name, pixel.X, pixel.Y)
+			port, ok := circuit.Signals[fields[1]]
+			if !ok || port.Kind != SignalGrid {
+				return nil, fmt.Errorf("%s:%d: unknown display or grid %s", cleanPath, lineNo+1, fields[1])
+			}
+			if pixel.X >= port.GridW || pixel.Y >= port.GridH {
+				return nil, fmt.Errorf("%s:%d: pixel (%d,%d) is outside grid %s bounds %dx%d", cleanPath, lineNo+1, pixel.X, pixel.Y, port.Name, port.GridW, port.GridH)
+			}
+			for _, op := range circuit.Ops {
+				if op.Kind == "PIXEL" && op.Outputs[0] == port.Name && op.X == pixel.X && op.Y == pixel.Y {
+					return nil, fmt.Errorf("%s:%d: duplicate pixel mapping for %s at (%d,%d)", cleanPath, lineNo+1, port.Name, pixel.X, pixel.Y)
 				}
 			}
-			display.Pixels = append(display.Pixels, pixel)
+			circuit.Ops = append(circuit.Ops, Operation{Kind: "PIXEL", Inputs: []string{pixel.Signal}, Outputs: []string{port.Name}, X: pixel.X, Y: pixel.Y})
+
+		case "GRID":
+			if len(fields) != 3 && len(fields) != 5 {
+				return nil, fmt.Errorf("%s:%d: invalid GRID", cleanPath, lineNo+1)
+			}
+			gridPort, ok := circuit.Signals[fields[1]]
+			if !ok || gridPort.Kind != SignalGrid {
+				return nil, fmt.Errorf("%s:%d: unknown grid %s", cleanPath, lineNo+1, fields[1])
+			}
+			displayPos, ok := displayIndex[fields[2]]
+			if !ok {
+				return nil, fmt.Errorf("%s:%d: unknown display %s", cleanPath, lineNo+1, fields[2])
+			}
+			x, y := 0, 0
+			if len(fields) == 5 {
+				x, err = strconv.Atoi(fields[3])
+				if err != nil || x < 0 {
+					return nil, fmt.Errorf("%s:%d: invalid grid x coordinate %q", cleanPath, lineNo+1, fields[3])
+				}
+				y, err = strconv.Atoi(fields[4])
+				if err != nil || y < 0 {
+					return nil, fmt.Errorf("%s:%d: invalid grid y coordinate %q", cleanPath, lineNo+1, fields[4])
+				}
+			}
+			display := &circuit.Displays[displayPos]
+			if x+gridPort.GridW > display.Width || y+gridPort.GridH > display.Height {
+				return nil, fmt.Errorf("%s:%d: grid %s at (%d,%d) exceeds display %s bounds %dx%d", cleanPath, lineNo+1, gridPort.Name, x, y, display.Name, display.Width, display.Height)
+			}
+			for _, placement := range display.Grids {
+				if placement.GridName == gridPort.Name && placement.X == x && placement.Y == y {
+					return nil, fmt.Errorf("%s:%d: duplicate grid placement for %s on %s at (%d,%d)", cleanPath, lineNo+1, gridPort.Name, display.Name, x, y)
+				}
+			}
+			display.Grids = append(display.Grids, DisplayGrid{GridName: gridPort.Name, X: x, Y: y})
 
 		case "HIGH", "LOW":
 			if len(fields) != 2 {
@@ -205,8 +309,22 @@ func loadCircuit(path string, registry map[string]*Circuit, loading map[string]b
 			if len(fields) < 3 {
 				return nil, fmt.Errorf("%s:%d: invalid SPLIT", cleanPath, lineNo+1)
 			}
+			outputWidth := 1
+			if src, ok := circuit.Signals[fields[1]]; ok {
+				if src.Kind == SignalBW {
+					outputWidth = 8
+					if len(fields)-2 != 1 {
+						return nil, fmt.Errorf("%s:%d: SPLIT on BW pixel needs exactly 1 output", cleanPath, lineNo+1)
+					}
+				} else if src.Kind == SignalRGB {
+					outputWidth = 8
+					if len(fields)-2 != 3 {
+						return nil, fmt.Errorf("%s:%d: SPLIT on RGB pixel needs exactly 3 outputs", cleanPath, lineNo+1)
+					}
+				}
+			}
 			for _, output := range fields[2:] {
-				if err := registerSignal(circuit.Signals, Port{Name: output, Kind: SignalBits, Width: 1}); err != nil {
+				if err := registerSignal(circuit.Signals, Port{Name: output, Kind: SignalBits, Width: outputWidth}); err != nil {
 					return nil, fmt.Errorf("%s:%d: %w", cleanPath, lineNo+1, err)
 				}
 			}
@@ -216,16 +334,24 @@ func loadCircuit(path string, registry map[string]*Circuit, loading map[string]b
 			if len(fields) < 4 {
 				return nil, fmt.Errorf("%s:%d: invalid JOIN", cleanPath, lineNo+1)
 			}
+			outputName := fields[len(fields)-1]
+			inputWidth := 1
+			outputPort, outputExists := circuit.Signals[outputName]
+			if outputExists && (outputPort.Kind == SignalBW || outputPort.Kind == SignalRGB) {
+				inputWidth = 8
+			}
 			for _, input := range fields[1 : len(fields)-1] {
-				if err := registerSignal(circuit.Signals, Port{Name: input, Kind: SignalBits, Width: 1}); err != nil {
+				if err := registerSignal(circuit.Signals, Port{Name: input, Kind: SignalBits, Width: inputWidth}); err != nil {
 					return nil, fmt.Errorf("%s:%d: %w", cleanPath, lineNo+1, err)
 				}
 			}
-			output := Port{Name: fields[len(fields)-1], Kind: SignalBits, Width: len(fields) - 2}
-			if err := registerSignal(circuit.Signals, output); err != nil {
-				return nil, fmt.Errorf("%s:%d: %w", cleanPath, lineNo+1, err)
+			if !outputExists {
+				output := Port{Name: outputName, Kind: SignalBits, Width: len(fields) - 2}
+				if err := registerSignal(circuit.Signals, output); err != nil {
+					return nil, fmt.Errorf("%s:%d: %w", cleanPath, lineNo+1, err)
+				}
 			}
-			circuit.Ops = append(circuit.Ops, Operation{Kind: "JOIN", Inputs: append([]string(nil), fields[1:len(fields)-1]...), Outputs: []string{fields[len(fields)-1]}})
+			circuit.Ops = append(circuit.Ops, Operation{Kind: "JOIN", Inputs: append([]string(nil), fields[1:len(fields)-1]...), Outputs: []string{outputName}})
 
 		case "USE":
 			if len(fields) < 4 {
@@ -386,6 +512,61 @@ func parseNamedPort(token string, kind SignalKind) (Port, error) {
 	return Port{Name: token, Kind: kind, Width: 0}, nil
 }
 
+func parseGridDeclaration(keyword, name, widthText, heightText string) (Port, string, error) {
+	if name == "" || strings.Contains(name, "[") || strings.Contains(name, "]") {
+		return Port{}, "", fmt.Errorf("invalid signal %q", name)
+	}
+	width, err := strconv.Atoi(widthText)
+	if err != nil || width < 1 {
+		return Port{}, "", fmt.Errorf("invalid grid width %q", widthText)
+	}
+	height, err := strconv.Atoi(heightText)
+	if err != nil || height < 1 {
+		return Port{}, "", fmt.Errorf("invalid grid height %q", heightText)
+	}
+	port := Port{Name: name, Kind: SignalGrid, GridW: width, GridH: height}
+	switch keyword {
+	case "INPUT_GRID":
+		return port, "input", nil
+	case "OUTPUT_GRID":
+		return port, "output", nil
+	case "WIRE_GRID":
+		return port, "wire", nil
+	default:
+		return Port{}, "", fmt.Errorf("unsupported declaration %s", keyword)
+	}
+}
+
+func parseButton(fields []string) (Button, Port, error) {
+	if len(fields) != 3 && len(fields) != 4 {
+		return Button{}, Port{}, fmt.Errorf("invalid BUTTON")
+	}
+	name := fields[1]
+	key := name
+	valueText := fields[2]
+	if len(fields) == 4 {
+		key = fields[2]
+		valueText = fields[3]
+	}
+	if name == "" || strings.Contains(name, "[") || strings.Contains(name, "]") {
+		return Button{}, Port{}, fmt.Errorf("invalid signal %q", name)
+	}
+	bits, err := parseBits(valueText, 8)
+	if err != nil {
+		return Button{}, Port{}, fmt.Errorf("button values must be exactly 8 bits: %w", err)
+	}
+	button := Button{Name: name, Key: normalizeButtonKey(key), Value: bits}
+	port := Port{Name: name, Kind: SignalBits, Width: 8}
+	return button, port, nil
+}
+
+func normalizeButtonKey(key string) string {
+	trimmed := strings.TrimSpace(key)
+	trimmed = strings.Trim(trimmed, "'")
+	trimmed = strings.Trim(trimmed, "\"")
+	return strings.ToUpper(trimmed)
+}
+
 func parseDisplay(name, widthText, heightText string) (Display, error) {
 	if name == "" || strings.Contains(name, "[") || strings.Contains(name, "]") {
 		return Display{}, fmt.Errorf("invalid display %q", name)
@@ -431,7 +612,7 @@ func parseSignalRef(token string, known map[string]Port) (Port, error) {
 
 func registerSignal(signals map[string]Port, port Port) error {
 	if existing, ok := signals[port.Name]; ok {
-		if existing.Kind != port.Kind || existing.Width != port.Width {
+		if existing.Kind != port.Kind || existing.Width != port.Width || existing.GridW != port.GridW || existing.GridH != port.GridH {
 			return fmt.Errorf("signal %s type mismatch", port.Name)
 		}
 		return nil

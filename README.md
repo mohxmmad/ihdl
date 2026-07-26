@@ -18,6 +18,9 @@ Current features:
 - interactive simulation
 - file-based simulation with `.iinp` and `.iout`
 - typed pixels: RGB and grayscale/BW
+- typed pixel grids: `INPUT_GRID`, `OUTPUT_GRID`, `WIRE_GRID`
+- bus ↔ pixel conversion (`BUF`, `SPLIT`, `JOIN`)
+- keyboard-style byte inputs with `BUTTON`
 - display windows with `.ippf` export
 
 ## 1. File Structure
@@ -74,6 +77,59 @@ Rules:
 - `BW` values are `0..255`
 - `BW` input can also be provided as 8-bit binary like `10101010`
 
+### Bus ↔ pixel conversion
+
+Bit buses can be converted to and from pixel types via `BUF`, `SPLIT`, and `JOIN`:
+
+- **8-bit bus ↔ BW pixel**: `BUF` converts between `DATA[8]` and a `BW` signal
+- **24-bit bus ↔ RGB pixel**: `BUF` converts between `DATA[24]` and an `RGB` signal
+- **BW pixel → 8-bit bus**: `SPLIT` on a BW pixel produces one 8-bit bus
+- **RGB pixel → 3×8-bit buses**: `SPLIT` on an RGB pixel produces three 8-bit buses (R, G, B)
+- **8-bit buses → BW pixel**: `JOIN` into a declared `OUTPUT_BW` port accepts 8-bit bus inputs
+- **8-bit buses → RGB pixel**: `JOIN` into a declared `OUTPUT_RGB` port accepts three 8-bit bus inputs
+
+Bus → BW:
+```ihdl
+INPUT DATA[8]
+OUTPUT_BW PIXEL
+BUF B1 DATA PIXEL
+```
+
+BW → bus:
+```ihdl
+INPUT_BW PIXEL
+OUTPUT DATA[8]
+SPLIT PIXEL DATA
+```
+
+Bus → RGB:
+```ihdl
+INPUT DATA[24]
+OUTPUT_RGB PIXEL
+BUF B1 DATA PIXEL
+```
+
+RGB → buses:
+```ihdl
+INPUT_RGB PIXEL
+OUTPUT R[8]
+OUTPUT G[8]
+OUTPUT B[8]
+SPLIT PIXEL R G B
+```
+
+Buses → RGB:
+```ihdl
+INPUT R[8]
+INPUT G[8]
+INPUT B[8]
+OUTPUT_RGB PIXEL
+JOIN R G B PIXEL
+```
+
+These conversions also work automatically at module boundaries when using `USE`:
+if a child module expects a `BW` or `RGB` input and the parent provides a compatible bus, the value is auto-converted.
+
 ## 4. Display
 
 Displays render pixel signals into a separate viewer window during interactive simulation.
@@ -92,6 +148,39 @@ Rules:
 - if a mapped signal has no value, that pixel stays black
 - unmapped pixels also stay black
 - display names must be declared before their `PIXEL` mappings
+
+### Grid signals
+
+Grids are reusable pixel buffers that can be passed between modules.
+
+```ihdl
+OUTPUT_GRID ICON 8 8
+PIXEL ICON 3 2 PX
+PIXEL ICON 4 2 PX
+```
+
+Rules:
+
+- `INPUT_GRID Name Width Height`, `OUTPUT_GRID Name Width Height`, and `WIRE_GRID Name Width Height` declare grid signals
+- `PIXEL Grid X Y Signal` writes one `RGB` or `BW` pixel into that grid
+- unset grid pixels stay black
+- `err` pixel inputs are treated as black when filling a grid
+
+### Placing a grid into a display
+
+Use `GRID` to blit a grid into a display.
+
+```ihdl
+DISPLAY BIG_SCREEN 64 64
+GRID ICON BIG_SCREEN
+GRID ICON BIG_SCREEN 56 0
+```
+
+Rules:
+
+- `GRID GridName DisplayName` places the grid at the top-left corner
+- `GRID GridName DisplayName X Y` places the grid at the given offset
+- the placed grid must fit completely inside the display
 
 ## 5. Clock
 
@@ -140,6 +229,43 @@ The clock toggles automatically at the given frequency (in Hz). Each half-cycle 
 clock manual CLK       # stop auto ticking, return to manual control
 ```
 
+## 5.1 Button Inputs
+
+Buttons are 8-bit source signals bound to interactive key names.
+
+```ihdl
+BUTTON KEY_A A 01000001
+BUTTON ENTER_KEY ENTER 00001101
+BUTTON DOWN_KEY DOWN 10000000
+```
+
+Rules:
+
+- `BUTTON Name Value` uses `Name` as both the signal name and interactive key name
+- `BUTTON Name Key Value` lets you bind an explicit key name
+- button values must be exactly 8 bits
+- button signals behave like 8-bit input ports in module connections
+- button values can flow through `BUF`, `SPLIT`, and `JOIN` like any other 8-bit bus
+- in interactive simulation, buttons start at `00000000`
+- in `.iinp` files, set the button by its signal name like any other input
+
+Interactive commands:
+
+```text
+press A
+release A
+press ENTER
+press DOWN
+```
+
+In interactive simulation, `press` and `release` accept either the signal name or the explicit key name.
+
+If a button name/key is unique, you can also enter it directly as a shortcut:
+
+```text
+ENTER
+```
+
 ## 6. Gates
 
 ### AND
@@ -162,7 +288,7 @@ NOT G1 IN OUT
 
 ### BUF
 
-`BUF` copies a signal unchanged.
+`BUF` copies a signal unchanged, or converts between compatible types.
 
 ```ihdl
 BUF B1 IN OUT
@@ -174,6 +300,20 @@ BUF B1 IN OUT
 - buses
 - RGB pixels
 - BW pixels
+
+`BUF` also converts between bit buses and pixel types when the output signal is declared as a different compatible type:
+
+- `DATA[8]` → `BW` pixel (8-bit bus to grayscale)
+- `DATA[24]` → `RGB` pixel (24-bit bus to RGB)
+- `BW` pixel → `DATA[8]` (grayscale to 8-bit bus)
+- `RGB` pixel → `DATA[24]` (RGB to 24-bit bus)
+
+Example:
+```ihdl
+INPUT DATA[8]
+OUTPUT_BW PIXEL
+BUF B1 DATA PIXEL    # converts 8-bit bus to BW pixel
+```
 
 Notes:
 
@@ -205,7 +345,7 @@ Rules:
 
 ## 8. Splitter
 
-Use `SPLIT` to split a bit bus into 1-bit outputs.
+Use `SPLIT` to split a bit bus or pixel into individual outputs.
 
 ```ihdl
 INPUT DATA[3]
@@ -216,15 +356,32 @@ OUTPUT B2
 SPLIT DATA B0 B1 B2
 ```
 
+`SPLIT` also works on pixel types:
+
+- **BW pixel** → one 8-bit bus output:
+  ```ihdl
+  INPUT_BW PIXEL
+  OUTPUT DATA[8]
+  SPLIT PIXEL DATA
+  ```
+- **RGB pixel** → three 8-bit bus outputs (R, G, B):
+  ```ihdl
+  INPUT_RGB PIXEL
+  OUTPUT R[8]
+  OUTPUT G[8]
+  OUTPUT B[8]
+  SPLIT PIXEL R G B
+  ```
+
 Rules:
 
-- splitter only works on bit buses
-- number of outputs must match bus width
-- each split output is 1 bit
+- on bit buses: number of outputs must match bus width, each output is 1 bit
+- on BW pixel: exactly 1 output of 8 bits
+- on RGB pixel: exactly 3 outputs of 8 bits each
 
 ## 9. Join
 
-Use `JOIN` to combine 1-bit signals into a bus.
+Use `JOIN` to combine signals into a bus or pixel.
 
 ```ihdl
 INPUT B0
@@ -235,12 +392,23 @@ OUTPUT BUS[3]
 JOIN B0 B1 B2 BUS
 ```
 
+`JOIN` also works into pixel outputs when the destination is declared as `OUTPUT_BW` or `OUTPUT_RGB`:
+
+- **Three 8-bit buses → RGB pixel**:
+  ```ihdl
+  INPUT R[8]
+  INPUT G[8]
+  INPUT B[8]
+  OUTPUT_RGB PIXEL
+  JOIN R G B PIXEL
+  ```
+
 Rules:
 
-- join only works on bit signals
-- each join input must be 1 bit
-- output width must match the number of joined inputs
-- input order becomes bus bit order
+- on bit bus output: each input must be 1 bit, output width matches input count
+- on `OUTPUT_BW` destination: inputs are 8-bit buses (one per pixel channel)
+- on `OUTPUT_RGB` destination: inputs are 8-bit buses (three channels)
+- input order becomes the channel/bus order
 
 ## 10. Modules
 
@@ -612,7 +780,6 @@ You can build larger structures like `3x3` grids by composing row or cell module
 ## 17. Current Limitations
 
 - no direct bit indexing like `DATA[0]`
-- no pixel arithmetic or pixel logic operations yet
-- `AND`, `OR`, `NOT`, `HIGH`, `LOW`, `SPLIT` are bit-only
-- pixels are currently routed with `BUF` and modules
+- no pixel arithmetic or pixel logic operations yet (convert to bus first with `SPLIT`, operate, then convert back with `JOIN`/`BUF`)
+- `AND`, `OR`, `NOT`, `HIGH`, `LOW` are bit-only
 - no sequential/stateful elements (no flip-flops, no latches)
