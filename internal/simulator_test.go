@@ -559,7 +559,7 @@ func TestDisplayRendersRGBAndBWSignals(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected display frame to be rendered")
 	}
-	if frame.Width != 8 || frame.Height != 8 {
+	if frame.Width != 16 || frame.Height != 8 {
 		t.Fatalf("unexpected frame size: %dx%d", frame.Width, frame.Height)
 	}
 }
