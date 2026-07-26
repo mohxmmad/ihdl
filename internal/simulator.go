@@ -27,8 +27,17 @@ func simulateWithIO(project *Project, options SimulationOptions, input io.Reader
 	inputs := make(map[string]Value, len(ports))
 	declared := make(map[string]Port, len(ports))
 	clocks := make(map[string]Port, len(project.Entry.Clocks))
-	buttons := make(map[string]Button, len(project.Entry.Buttons))
-	buttonLookup := make(map[string]string, len(project.Entry.Buttons)*2)
+	project.ButtonState = make(map[string]Value)
+	buttons := make(map[string]Button)
+	buttonLookup := make(map[string]string)
+	for _, circuit := range project.Circuits {
+		for _, btn := range circuit.Buttons {
+			registerGlobalButton(btn, buttons, buttonLookup, project.ButtonState)
+		}
+	}
+	for _, btn := range project.Entry.Buttons {
+		registerGlobalButton(btn, buttons, buttonLookup, project.ButtonState)
+	}
 	tappedButtons := make(map[string]bool)
 
 	for _, port := range ports {
@@ -49,14 +58,7 @@ func simulateWithIO(project *Project, options SimulationOptions, input io.Reader
 			inputs[port.Name] = errValue()
 		}
 	}
-	for _, btn := range project.Entry.Buttons {
-		port := Port{Name: btn.Name, Kind: SignalBits, Width: 8}
-		declared[btn.Name] = port
-		buttons[btn.Name] = btn
-		buttonLookup[normalizeButtonKey(btn.Name)] = btn.Name
-		buttonLookup[btn.Key] = btn.Name
-		inputs[btn.Name] = Value{Kind: SignalBits, Bits: make([]bool, 8)}
-	}
+
 	for _, port := range project.Entry.Clocks {
 		clocks[port.Name] = port
 	}
@@ -98,12 +100,14 @@ func simulateWithIO(project *Project, options SimulationOptions, input io.Reader
 			case simulationCommandSet:
 				inputs[command.port.Name] = command.value
 			case simulationCommandButtonTap:
-				if err := setButtonInput(inputs, buttons, command.buttonName, true); err != nil {
-					fmt.Fprintf(output, "%v\n", err)
+				if button, ok := buttons[command.buttonName]; ok {
+					project.ButtonState[command.buttonName] = Value{Kind: SignalBits, Bits: append([]bool(nil), button.Value...)}
+					tappedButtons[command.buttonName] = true
+				} else {
+					fmt.Fprintf(output, "unknown button %s\n", command.buttonName)
 					printSimulationPrompt(output)
 					continue
 				}
-				tappedButtons[command.buttonName] = true
 			case simulationCommandClockAuto:
 				if err := setClockAuto(clockStates, command.clockName, command.frequencyHz, time.Now()); err != nil {
 					fmt.Fprintf(output, "%v\n", err)
@@ -123,7 +127,7 @@ func simulateWithIO(project *Project, options SimulationOptions, input io.Reader
 					printSimulationPrompt(output)
 					continue
 				}
-				clearTappedButtons(tappedButtons, inputs)
+				clearTappedButtons(tappedButtons, project.ButtonState)
 				rerender = false
 			}
 
@@ -132,7 +136,7 @@ func simulateWithIO(project *Project, options SimulationOptions, input io.Reader
 				if err != nil {
 					return err
 				}
-				clearTappedButtons(tappedButtons, inputs)
+				clearTappedButtons(tappedButtons, project.ButtonState)
 			}
 			printSimulationPrompt(output)
 
@@ -142,7 +146,7 @@ func simulateWithIO(project *Project, options SimulationOptions, input io.Reader
 				if err != nil {
 					return err
 				}
-				clearTappedButtons(tappedButtons, inputs)
+				clearTappedButtons(tappedButtons, project.ButtonState)
 				printSimulationPrompt(output)
 			}
 		}
@@ -188,12 +192,13 @@ func evaluate(project *Project, circuit *Circuit, inputs map[string]Value, scope
 		}
 	}
 	for _, btn := range circuit.Buttons {
-		value, ok := inputs[btn.Name]
-		if ok {
-			env[btn.Name] = cloneValue(value)
-		} else {
-			env[btn.Name] = Value{Kind: SignalBits, Bits: make([]bool, 8)}
+		if project.ButtonState != nil {
+			if val, ok := project.ButtonState[btn.Name]; ok {
+				env[btn.Name] = cloneValue(val)
+				continue
+			}
 		}
+		env[btn.Name] = Value{Kind: SignalBits, Bits: make([]bool, 8)}
 	}
 
 	if project.WireState != nil {
@@ -1143,6 +1148,13 @@ func isButtonSignal(circuit *Circuit, name string) bool {
 	return ok
 }
 
+func registerGlobalButton(btn Button, buttons map[string]Button, lookup map[string]string, state map[string]Value) {
+	buttons[btn.Name] = btn
+	lookup[normalizeButtonKey(btn.Name)] = btn.Name
+	lookup[btn.Key] = btn.Name
+	state[btn.Name] = Value{Kind: SignalBits, Bits: make([]bool, 8)}
+}
+
 func buttonByName(circuit *Circuit, name string) (Button, bool) {
 	for _, button := range circuit.Buttons {
 		if button.Name == name {
@@ -1280,19 +1292,6 @@ func portFromValue(name string, value Value) Port {
 		port.GridH = value.GridH
 	}
 	return port
-}
-
-func setButtonInput(inputs map[string]Value, buttons map[string]Button, name string, pressed bool) error {
-	button, ok := buttons[name]
-	if !ok {
-		return fmt.Errorf("unknown button %s", name)
-	}
-	bits := make([]bool, 8)
-	if pressed {
-		copy(bits, button.Value)
-	}
-	inputs[name] = Value{Kind: SignalBits, Bits: bits}
-	return nil
 }
 
 func clearTappedButtons(tapped map[string]bool, inputs map[string]Value) {

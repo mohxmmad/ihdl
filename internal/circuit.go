@@ -202,8 +202,9 @@ type Circuit struct {
 }
 
 type Project struct {
-	Entry     *Circuit
-	Circuits  map[string]*Circuit
-	Frames    map[string]DisplayFrame
-	WireState map[string]map[string]Value
+	Entry       *Circuit
+	Circuits    map[string]*Circuit
+	Frames      map[string]DisplayFrame
+	WireState   map[string]map[string]Value
+	ButtonState map[string]Value
 }
