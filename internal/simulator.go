@@ -204,7 +204,7 @@ func simulateWithTTY(project *Project, options SimulationOptions, stdin *os.File
 	for _, port := range ports {
 		declared[port.Name] = port
 		fmt.Fprint(ttyOut, inputPrompt(port))
-		line, err := readTTYLine(byteCh)
+		line, err := readTTYLine(byteCh, ttyOut)
 		if err != nil {
 			return err
 		}
@@ -363,7 +363,7 @@ func simulateWithTTY(project *Project, options SimulationOptions, stdin *os.File
 	}
 }
 
-func readTTYLine(bytes <-chan inputByte) (string, error) {
+func readTTYLine(bytes <-chan inputByte, echo io.Writer) (string, error) {
 	var b strings.Builder
 	for {
 		ch, ok := <-bytes
@@ -377,6 +377,7 @@ func readTTYLine(bytes <-chan inputByte) (string, error) {
 			return "", ch.err
 		}
 		if ch.b == '\r' || ch.b == '\n' {
+			fmt.Fprint(echo, "\r\n")
 			return b.String(), nil
 		}
 		if ch.b == 8 || ch.b == 127 {
@@ -384,10 +385,14 @@ func readTTYLine(bytes <-chan inputByte) (string, error) {
 			if len(text) > 0 {
 				b.Reset()
 				b.WriteString(text[:len(text)-1])
+				fmt.Fprint(echo, "\b \b")
 			}
 			continue
 		}
 		b.WriteByte(ch.b)
+		if ch.b >= 32 && ch.b < 127 {
+			fmt.Fprintf(echo, "%c", ch.b)
+		}
 	}
 }
 
@@ -1003,9 +1008,10 @@ type simulationCommand struct {
 }
 
 type clockState struct {
-	mode       clockMode
-	frequency  float64
-	nextToggle time.Time
+	mode        clockMode
+	frequency   float64
+	nextToggle  time.Time
+	toggleCount int
 }
 
 type simulationLine struct {
@@ -1207,6 +1213,7 @@ func setClockAuto(states map[string]*clockState, name string, frequency float64,
 	state.mode = clockModeAuto
 	state.frequency = frequency
 	state.nextToggle = now.Add(halfPeriod)
+	state.toggleCount = 0
 	return nil
 }
 
@@ -1226,6 +1233,7 @@ func setClockManual(states map[string]*clockState, name string) error {
 	state.mode = clockModeManual
 	state.frequency = 0
 	state.nextToggle = time.Time{}
+	state.toggleCount = 0
 	return nil
 }
 
@@ -1324,17 +1332,16 @@ func advanceAutoClocks(inputs map[string]Value, states map[string]*clockState, n
 		if err != nil {
 			continue
 		}
-		toggles := 0
 		for !state.nextToggle.After(now) {
 			if err := toggleClockInput(inputs, name); err != nil {
 				break
 			}
 			state.nextToggle = state.nextToggle.Add(halfPeriod)
-			toggles++
+			state.toggleCount++
 			changed = true
-		}
-		if state.mode == clockModeAutoEnter && toggles >= 2 && toggles%2 == 0 {
-			enterRequested = true
+			if state.mode == clockModeAutoEnter && state.toggleCount%2 == 0 {
+				enterRequested = true
+			}
 		}
 	}
 	return changed, enterRequested
