@@ -21,10 +21,9 @@ func SimulateWithOptions(project *Project, options SimulationOptions) error {
 		_ = savePersistentState(project)
 	}()
 	if isTerminalFile(os.Stdin) && isTerminalFile(os.Stdout) {
-		if err := simulateWithTTY(project, options, os.Stdin, os.Stdout); err != nil {
-			return err
+		if err := simulateWithTTY(project, options, os.Stdin, os.Stdout); err == nil {
+			return nil
 		}
-		return nil
 	}
 	return simulateWithIO(project, options, os.Stdin, os.Stdout)
 }
