@@ -5,11 +5,12 @@ import "fmt"
 type SignalKind string
 
 const (
-	SignalBits SignalKind = "bits"
-	SignalRGB  SignalKind = "rgb"
-	SignalBW   SignalKind = "bw"
-	SignalGrid SignalKind = "grid"
-	SignalErr  SignalKind = "err"
+	SignalBits   SignalKind = "bits"
+	SignalRGB    SignalKind = "rgb"
+	SignalBW     SignalKind = "bw"
+	SignalGrid   SignalKind = "grid"
+	SignalIgnore SignalKind = "ignore"
+	SignalErr    SignalKind = "err"
 )
 
 type Port struct {
@@ -35,6 +36,10 @@ func cloneValue(value Value) Value {
 
 func errValue() Value {
 	return Value{Kind: SignalErr}
+}
+
+func ignoreValue() Value {
+	return Value{Kind: SignalIgnore}
 }
 
 func bitsToChannel(bits []bool) (uint8, error) {
@@ -97,6 +102,9 @@ func ConvertValue(value Value, targetKind SignalKind) (Value, error) {
 	if value.Kind == SignalErr || targetKind == SignalErr {
 		return errValue(), nil
 	}
+	if value.Kind == SignalIgnore || targetKind == SignalIgnore {
+		return ignoreValue(), nil
+	}
 	switch value.Kind {
 	case SignalBits:
 		switch targetKind {
@@ -131,6 +139,9 @@ func ConvertValue(value Value, targetKind SignalKind) (Value, error) {
 
 func CompatibleKinds(a, b SignalKind) bool {
 	if a == b {
+		return true
+	}
+	if a == SignalIgnore || b == SignalIgnore {
 		return true
 	}
 	if a == SignalBits && (b == SignalBW || b == SignalRGB) {
@@ -203,8 +214,11 @@ type Circuit struct {
 
 type Project struct {
 	Entry       *Circuit
+	EntryPath   string
+	StatePath   string
 	Circuits    map[string]*Circuit
 	Frames      map[string]DisplayFrame
 	WireState   map[string]map[string]Value
 	ButtonState map[string]Value
+	FloatState  map[string]Value
 }

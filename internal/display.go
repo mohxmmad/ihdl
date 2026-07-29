@@ -48,7 +48,7 @@ func renderDisplays(project *Project, circuit *Circuit, env map[string]Value, sc
 			if !ok {
 				continue
 			}
-			if value.Kind == SignalErr {
+			if value.Kind == SignalErr || value.Kind == SignalIgnore {
 				continue
 			}
 			rgb, err := valueToRGB(value)
@@ -59,7 +59,7 @@ func renderDisplays(project *Project, circuit *Circuit, env map[string]Value, sc
 		}
 		for _, placement := range display.Grids {
 			value, ok := env[placement.GridName]
-			if !ok || value.Kind == SignalErr {
+			if !ok || value.Kind == SignalErr || value.Kind == SignalIgnore {
 				continue
 			}
 			if value.Kind != SignalGrid {

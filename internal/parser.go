@@ -31,6 +31,11 @@ func ParseProject(entryPath string) (*Project, error) {
 	}
 
 	project.Entry = entry
+	project.EntryPath = absEntry
+	project.StatePath = persistentStatePath(absEntry)
+	if err := loadPersistentState(project); err != nil {
+		return nil, err
+	}
 	return project, nil
 }
 
@@ -299,11 +304,23 @@ func loadCircuit(path string, registry map[string]*Circuit, loading map[string]b
 			}
 			circuit.Ops = append(circuit.Ops, Operation{Kind: fields[0], Name: fields[1], Inputs: []string{fields[2], fields[3]}, Outputs: []string{fields[4]}})
 
-		case "NOT", "BUF":
+		case "NOT", "BUF", "IGNORE":
 			if len(fields) != 4 {
 				return nil, fmt.Errorf("%s:%d: invalid %s", cleanPath, lineNo+1, fields[0])
 			}
 			circuit.Ops = append(circuit.Ops, Operation{Kind: fields[0], Name: fields[1], Inputs: []string{fields[2]}, Outputs: []string{fields[3]}})
+
+		case "FLOAT":
+			if len(fields) != 4 {
+				return nil, fmt.Errorf("%s:%d: invalid FLOAT", cleanPath, lineNo+1)
+			}
+			if err := registerSignal(circuit.Signals, Port{Name: fields[2], Kind: SignalBits, Width: 1}); err != nil {
+				return nil, fmt.Errorf("%s:%d: %w", cleanPath, lineNo+1, err)
+			}
+			if err := registerSignal(circuit.Signals, Port{Name: fields[3], Kind: SignalBits, Width: 1}); err != nil {
+				return nil, fmt.Errorf("%s:%d: %w", cleanPath, lineNo+1, err)
+			}
+			circuit.Ops = append(circuit.Ops, Operation{Kind: "FLOAT", Name: fields[1], Inputs: []string{fields[2]}, Outputs: []string{fields[3]}})
 
 		case "SPLIT":
 			if len(fields) < 3 {

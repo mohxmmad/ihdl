@@ -2,3 +2,4 @@ ihdl
 ihdl-*
 *.exe
 ihdl.md
+*.state

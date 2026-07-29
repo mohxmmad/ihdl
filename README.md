@@ -15,12 +15,14 @@ Current features:
 - explicit module instantiation
 - internal wires
 - clocks as source ports
+- execution-state `IGNORE`
 - interactive simulation
 - file-based simulation with `.iinp` and `.iout`
 - typed pixels: RGB and grayscale/BW
 - typed pixel grids: `INPUT_GRID`, `OUTPUT_GRID`, `WIRE_GRID`
 - bus ↔ pixel conversion (`BUF`, `SPLIT`, `JOIN`)
 - keyboard-style byte inputs with `BUTTON`
+- persistent `FLOAT` gates with `.state` files
 - display windows with `.ippf` export
 
 ## 1. File Structure
@@ -200,11 +202,14 @@ Rules:
 
 ### Clock modes
 
-Three modes control a clock during interactive simulation:
+Four modes control a clock during interactive simulation:
 
 - **Manual** (default): the clock holds its initial value until you toggle it
 - **Auto**: the clock toggles automatically at a given frequency
+- **Enter**: like auto, but also auto-submits the input buffer once per full cycle
 - **Step**: advance one half or full cycle manually
+
+When in auto or enter mode, pressing `Esc` returns the clock to manual mode.
 
 ### Step a clock
 
@@ -223,11 +228,21 @@ clock auto CLK 0.5     # toggle every 0.5 seconds
 
 The clock toggles automatically at the given frequency (in Hz). Each half-cycle toggle triggers a full recomputation of all outputs. Auto-ticking continues until you stop it.
 
-### Stop auto clock
+### Auto-enter clock
 
 ```text
-clock manual CLK       # stop auto ticking, return to manual control
+clock enter CLK 0.5
 ```
+
+This mode behaves like `clock auto`, but every full clock cycle it also auto-submits the current runtime input buffer as if Enter was pressed.
+
+### Stop auto/enter clock
+
+```text
+clock manual CLK       # stop auto/enter ticking, return to manual control
+```
+
+Pressing `Esc` in the terminal UI also stops all auto/enter clocks and returns them to manual.
 
 ## 5.1 Button Inputs
 
@@ -266,7 +281,24 @@ ENTER
 ```
 
 This is equivalent to `tap ENTER`.
+
+Pressing `Esc` in the terminal UI returns all clocks to manual control.
+
+## 5.2 Floating Gates
+
+Floating gates store one persistent bit between simulator runs.
+
+```ihdl
+FLOAT F1 IN OUT
 ```
+
+Rules:
+
+- `FLOAT Name In Out` declares a persistent 1-bit storage element
+- reading `OUT` gives the gate's current stored bit during runtime
+- writing `IN` updates the stored bit during runtime and for the next run
+- floating gate state is saved in a `.state` file beside the top-level `.ihdl` file
+- each floating gate is identified by its full instance path, like `Computer.CPU.MEM.F1`
 
 ## 6. Gates
 
@@ -317,12 +349,28 @@ OUTPUT_BW PIXEL
 BUF B1 DATA PIXEL    # converts 8-bit bus to BW pixel
 ```
 
+### IGNORE
+
+`IGNORE` turns an inactive bit into an execution-state ignore.
+
+```ihdl
+IGNORE G1 IN OUT
+```
+
+Rules:
+
+- if `IN` is `0`, `OUT` becomes `ignore`
+- if `IN` is `1`, `OUT` stays `1`
+- `IGNORE` propagates `ignore` unchanged
+- primitive gates and module boundaries consume `ignore` before it can reach stored state
+
 Notes:
 
 - `AND`, `OR`, `NOT` only work on bit signals and buses
 - both `AND` inputs must have the same width
 - both `OR` inputs must have the same width
 - `NOT` preserves width
+- `AND`, `OR`, `NOT`, and `BUF` propagate `ignore`
 - `AND` and `OR` use **short-circuit evaluation**: if one input determines the result regardless of the other, the gate resolves even when the other input is unknown or an error (e.g. `AND(X, 0)` → `0`, `OR(X, 1)` → `1`)
 
 ## 7. Constants
@@ -380,6 +428,7 @@ Rules:
 - on bit buses: number of outputs must match bus width, each output is 1 bit
 - on BW pixel: exactly 1 output of 8 bits
 - on RGB pixel: exactly 3 outputs of 8 bits each
+- if the source is `ignore`, every split output becomes `ignore`
 
 ## 9. Join
 
@@ -411,6 +460,7 @@ Rules:
 - on `OUTPUT_BW` destination: inputs are 8-bit buses (one per pixel channel)
 - on `OUTPUT_RGB` destination: inputs are 8-bit buses (three channels)
 - input order becomes the channel/bus order
+- if any joined input is `ignore`, the output becomes `ignore`
 
 ## 10. Modules
 
@@ -450,6 +500,8 @@ Signal order is:
 1. all child `INPUT`s in declaration order
 2. all child `CLOCK`s in declaration order
 3. all child `OUTPUT`s in declaration order
+
+If any child input is `ignore`, the module is skipped and its outputs become `ignore` at the boundary.
 
 Short-circuit evaluation works through module boundaries: if a sub-module input is unknown or missing but the output is determined by other inputs (e.g. `AND(err, 0)` inside the child), the module resolves correctly instead of propagating an error.
 
@@ -534,6 +586,16 @@ This allows chains of dependent operations to resolve across multiple passes wit
 
 Short-circuit evaluation works through module boundaries: when a sub-module input is `err` or missing (no operation produces it), the simulator passes `err` as the child input and lets the child's own short-circuit evaluation handle it.
 
+### IGNORE evaluation
+
+`ignore` is an execution-state value, not an electrical one:
+
+- primitive gates propagate `ignore` unchanged
+- `IGNORE(0)` produces `ignore`
+- `IGNORE(1)` produces `1`
+- modules stop at the boundary when any input is `ignore`
+- `ignore` never enters wire or floating-gate storage
+
 ### Unresolved signals
 
 Any signal that cannot be resolved after all passes is displayed as `err`:
@@ -578,9 +640,12 @@ After startup you can use:
 - `set <signal> <value>` to change one source signal and immediately recompute outputs
 - `<signal> <value>` as a shorter form of `set`
 - `clock auto <clock> <hz>` to start automatic half-cycle toggling for a clock source
+- `clock enter <clock> <hz>` to start automatic half-cycle toggling plus auto-Enter submission
 - `clock manual <clock>` to stop automatic ticking and return that clock to manual control
 - `clock step <clock> half` to advance one half cycle manually
 - `clock step <clock> full` to advance two half cycles manually
+- `escape` to stop automatic clock mode in the interactive shell (non-terminal mode)
+- `Esc` key also stops automatic clock mode in the terminal UI
 - `show` to recompute and print outputs again without changing inputs
 - `stop` to end the simulation session
 
@@ -589,6 +654,7 @@ Output values appear as:
 - binary strings for bit buses (e.g. `1010`)
 - `r,g,b` tuples for RGB pixels
 - decimal or binary for BW pixels
+- `ignore` for execution-state values
 - `err` for unresolved or unknown signals
 
 If the module declares a `DISPLAY`, iHDL also starts a local viewer window in your browser and refreshes the rendered frame after each change.
@@ -779,9 +845,35 @@ RGBPassthrough C3 P3 L3 O3 B3
 
 You can build larger structures like `3x3` grids by composing row or cell modules the same way.
 
+### Floating gate (persistent state)
+
+```ihdl
+MODULE FloatGate
+
+INPUT IN
+OUTPUT OUT
+
+FLOAT F1 IN OUT
+```
+
+The stored bit persists between simulator runs in a `.state` file beside the top-level `.ihdl`.
+
+### IGNORE gate (execution-state)
+
+```ihdl
+MODULE IgnoreGate
+
+INPUT IN
+OUTPUT OUT
+
+IGNORE G1 IN OUT
+```
+
+When `IN` is `0`, `OUT` becomes `ignore`. When `IN` is `1`, `OUT` stays `1`. All primitive gates propagate `ignore` unchanged.
+
 ## 17. Current Limitations
 
 - no direct bit indexing like `DATA[0]`
 - no pixel arithmetic or pixel logic operations yet (convert to bus first with `SPLIT`, operate, then convert back with `JOIN`/`BUF`)
 - `AND`, `OR`, `NOT`, `HIGH`, `LOW` are bit-only
-- no sequential/stateful elements (no flip-flops, no latches)
+- built-in stateful elements are limited to `FLOAT` (persistent 1-bit storage)

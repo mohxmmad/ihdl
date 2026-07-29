@@ -138,6 +138,120 @@ func TestGateWithExplicitErrInput(t *testing.T) {
 	}
 }
 
+func TestIgnorePrimitivePropagatesAndStopsModule(t *testing.T) {
+	circ := &Circuit{
+		Name:    "Top",
+		Inputs:  []Port{{Name: "A", Kind: SignalBits, Width: 1}},
+		Outputs: []Port{{Name: "OUT", Kind: SignalBits, Width: 1}, {Name: "BUS", Kind: SignalBits, Width: 2}},
+		Signals: map[string]Port{"A": {Name: "A", Kind: SignalBits, Width: 1}, "OUT": {Name: "OUT", Kind: SignalBits, Width: 1}, "BUS": {Name: "BUS", Kind: SignalBits, Width: 2}},
+		Ops: []Operation{
+			{Kind: "IGNORE", Name: "G1", Inputs: []string{"A"}, Outputs: []string{"X"}},
+			{Kind: "NOT", Name: "G2", Inputs: []string{"X"}, Outputs: []string{"OUT"}},
+			{Kind: "SPLIT", Inputs: []string{"X"}, Outputs: []string{"B0", "B1"}},
+			{Kind: "JOIN", Inputs: []string{"B0", "B1"}, Outputs: []string{"BUS"}},
+		},
+	}
+	proj := &Project{Entry: circ, Circuits: map[string]*Circuit{"Top": circ}}
+
+	outputs, err := Evaluate(proj, circ, map[string]Value{"A": {Kind: SignalBits, Bits: []bool{false}}})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if got := formatValue(outputs["OUT"]); got != "ignore" {
+		t.Fatalf("expected OUT=ignore, got %s", got)
+	}
+	if got := formatValue(outputs["BUS"]); got != "ignore" {
+		t.Fatalf("expected BUS=ignore, got %s", got)
+	}
+
+	child := &Circuit{
+		Name:    "Child",
+		Inputs:  []Port{{Name: "IN", Kind: SignalBits, Width: 1}},
+		Outputs: []Port{{Name: "OUT", Kind: SignalBits, Width: 1}},
+		Signals: map[string]Port{"IN": {Name: "IN", Kind: SignalBits, Width: 1}, "OUT": {Name: "OUT", Kind: SignalBits, Width: 1}},
+		Ops:     []Operation{{Kind: "FLOAT", Name: "F1", Inputs: []string{"IN"}, Outputs: []string{"OUT"}}},
+	}
+	parent := &Circuit{
+		Name:    "Parent",
+		Inputs:  []Port{{Name: "IN", Kind: SignalBits, Width: 1}},
+		Outputs: []Port{{Name: "OUT", Kind: SignalBits, Width: 1}},
+		Signals: map[string]Port{"IN": {Name: "IN", Kind: SignalBits, Width: 1}, "OUT": {Name: "OUT", Kind: SignalBits, Width: 1}},
+		Ops:     []Operation{{Kind: "USE", Name: "C1", Module: "Child", Signals: []string{"IN", "OUT"}}},
+	}
+	proj = &Project{Entry: parent, Circuits: map[string]*Circuit{"Parent": parent, "Child": child}, FloatState: map[string]Value{"Parent.C1.F1": {Kind: SignalBits, Bits: []bool{true}}}}
+
+	outputs, err = Evaluate(proj, parent, map[string]Value{"IN": ignoreValue()})
+	if err != nil {
+		t.Fatalf("evaluate child ignore: %v", err)
+	}
+	if got := formatValue(outputs["OUT"]); got != "ignore" {
+		t.Fatalf("expected parent OUT=ignore, got %s", got)
+	}
+	if got := formatValue(proj.FloatState["Parent.C1.F1"]); got != "1" {
+		t.Fatalf("expected floating state to remain 1, got %s", got)
+	}
+}
+
+func TestFloatingGatePersistenceAcrossRuns(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "computer.ihdl")
+	data := strings.Join([]string{
+		"MODULE Computer",
+		"INPUT IN",
+		"OUTPUT OUT",
+		"FLOAT F1 IN OUT",
+		"",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write module: %v", err)
+	}
+	project, err := ParseProject(path)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	inputPath := filepath.Join(dir, "case.iinp")
+	outputPath := filepath.Join(dir, "case.iout")
+	if err := os.WriteFile(inputPath, []byte("IN 1\n"), 0o644); err != nil {
+		t.Fatalf("write input: %v", err)
+	}
+	if err := SimulateFromFilesWithOptions(project, inputPath, outputPath, SimulationOptions{}); err != nil {
+		t.Fatalf("simulate first run: %v", err)
+	}
+	dataOut, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	if string(dataOut) != "OUT 0\n" {
+		t.Fatalf("unexpected first output: %q", string(dataOut))
+	}
+	statePath := filepath.Join(dir, "computer.state")
+	stateData, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	if string(stateData) != "Computer.F1 1\n" {
+		t.Fatalf("unexpected state file: %q", string(stateData))
+	}
+
+	project, err = ParseProject(path)
+	if err != nil {
+		t.Fatalf("reparse: %v", err)
+	}
+	if err := os.WriteFile(inputPath, []byte("IN 0\n"), 0o644); err != nil {
+		t.Fatalf("rewrite input: %v", err)
+	}
+	if err := SimulateFromFilesWithOptions(project, inputPath, outputPath, SimulationOptions{}); err != nil {
+		t.Fatalf("simulate second run: %v", err)
+	}
+	dataOut, err = os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	if string(dataOut) != "OUT 1\n" {
+		t.Fatalf("unexpected second output: %q", string(dataOut))
+	}
+}
+
 func TestCrossDependentFeedbackChainResolvesInMultiplePasses(t *testing.T) {
 	circ := &Circuit{
 		Name:    "CrossDeps",
@@ -420,7 +534,7 @@ func TestAdvanceAutoClocks(t *testing.T) {
 		"CLK": {mode: clockModeAuto, frequency: 0.5, nextToggle: now.Add(-250 * time.Millisecond)},
 	}
 
-	if !advanceAutoClocks(inputs, states, now.Add(2250*time.Millisecond)) {
+	if changed, _ := advanceAutoClocks(inputs, states, now.Add(2250*time.Millisecond)); !changed {
 		t.Fatalf("expected auto clock advance")
 	}
 	if got := formatValue(inputs["CLK"]); got != "1" {
