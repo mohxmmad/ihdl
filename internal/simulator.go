@@ -519,6 +519,11 @@ func evaluate(project *Project, circuit *Circuit, inputs map[string]Value, scope
 			project.WireState[scope][wire.Name] = cloneValue(value)
 		}
 	}
+	for _, out := range circuit.Outputs {
+		if value, ok := env[out.Name]; ok && value.Kind != SignalErr {
+			project.WireState[scope][out.Name] = cloneValue(value)
+		}
+	}
 
 	outputs := make(map[string]Value, len(circuit.Outputs))
 	if err := renderDisplays(project, circuit, env, scope); err != nil {
@@ -884,9 +889,17 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 			childInputs[in.Name] = cloneValue(converted)
 		}
 		if ignored {
-			for i := range child.Outputs {
+			childInstance := childScope(scope, op)
+			ws, hasState := project.WireState[childInstance]
+			for i, out := range child.Outputs {
 				parentSignal := op.Signals[len(sources)+i]
-				env[parentSignal] = ignoreValue()
+				if hasState {
+					if value, ok := ws[out.Name]; ok {
+						env[parentSignal] = cloneValue(value)
+						continue
+					}
+				}
+				env[parentSignal] = defaultOutputValue(out)
 			}
 			return true, nil
 		}
@@ -1711,6 +1724,21 @@ func portFromValue(name string, value Value) Port {
 		port.GridH = value.GridH
 	}
 	return port
+}
+
+func defaultOutputValue(port Port) Value {
+	switch port.Kind {
+	case SignalBits:
+		return Value{Kind: SignalBits, Bits: make([]bool, port.Width)}
+	case SignalBW:
+		return Value{Kind: SignalBW, Channels: []uint8{0}}
+	case SignalRGB:
+		return Value{Kind: SignalRGB, Channels: []uint8{0, 0, 0}}
+	case SignalGrid:
+		return zeroGridValue(port.GridW, port.GridH)
+	default:
+		return errValue()
+	}
 }
 
 func clearTappedButtons(tapped map[string]bool, inputs map[string]Value) {

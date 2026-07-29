@@ -1203,3 +1203,65 @@ func TestBUFWithPixelInModuleUse(t *testing.T) {
 		t.Fatalf("expected PX=170, got %d", outputs["PX"].Channels[0])
 	}
 }
+
+func TestIgnoreInputSkipsModuleUseAndUsesCachedOutput(t *testing.T) {
+	child := &Circuit{
+		Name:    "Child",
+		Inputs:  []Port{{Name: "IN", Kind: SignalBits, Width: 1}},
+		Outputs: []Port{{Name: "OUT", Kind: SignalBits, Width: 1}},
+		Signals: map[string]Port{"IN": {Name: "IN", Kind: SignalBits, Width: 1}, "OUT": {Name: "OUT", Kind: SignalBits, Width: 1}},
+		Ops:     []Operation{{Kind: "FLOAT", Name: "F1", Inputs: []string{"IN"}, Outputs: []string{"OUT"}}},
+	}
+	parent := &Circuit{
+		Name:    "Parent",
+		Inputs:  []Port{{Name: "IN", Kind: SignalBits, Width: 1}},
+		Outputs: []Port{{Name: "OUT", Kind: SignalBits, Width: 1}},
+		Signals: map[string]Port{
+			"IN":  {Name: "IN", Kind: SignalBits, Width: 1},
+			"X":   {Name: "X", Kind: SignalBits, Width: 1},
+			"OUT": {Name: "OUT", Kind: SignalBits, Width: 1},
+		},
+		Ops: []Operation{
+			{Kind: "IGNORE", Name: "G1", Inputs: []string{"IN"}, Outputs: []string{"X"}},
+			{Kind: "USE", Name: "C1", Module: "Child", Signals: []string{"X", "OUT"}},
+		},
+	}
+	proj := &Project{
+		Entry:      parent,
+		Circuits:   map[string]*Circuit{"Parent": parent, "Child": child},
+		FloatState: map[string]Value{"Parent.C1.F1": {Kind: SignalBits, Bits: []bool{true}}},
+	}
+
+	// IN=0 → IGNORE(0) gives X=ignore → child skipped → default cached output = 0
+	outputs, err := Evaluate(proj, parent, map[string]Value{"IN": {Kind: SignalBits, Bits: []bool{false}}})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if got := formatValue(outputs["OUT"]); got != "0" {
+		t.Fatalf("expected OUT=0 (cached default), got %s", got)
+	}
+	if got := formatValue(proj.FloatState["Parent.C1.F1"]); got != "1" {
+		t.Fatalf("expected FloatState to remain 1, got %s", got)
+	}
+
+	// IN=1 → IGNORE(1) passes 1 through → child evaluated → OUT=1, FloatState updated
+	outputs, err = Evaluate(proj, parent, map[string]Value{"IN": {Kind: SignalBits, Bits: []bool{true}}})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if got := formatValue(outputs["OUT"]); got != "1" {
+		t.Fatalf("expected OUT=1, got %s", got)
+	}
+	if got := formatValue(proj.FloatState["Parent.C1.F1"]); got != "1" {
+		t.Fatalf("expected FloatState to be 1, got %s", got)
+	}
+
+	// IN=0 again → IGNORE(0) → child skipped → should use cached output (1) from previous eval
+	outputs, err = Evaluate(proj, parent, map[string]Value{"IN": {Kind: SignalBits, Bits: []bool{false}}})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if got := formatValue(outputs["OUT"]); got != "1" {
+		t.Fatalf("expected OUT=1 (cached from previous eval), got %s", got)
+	}
+}
