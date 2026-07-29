@@ -7,6 +7,34 @@ import (
 	"strings"
 )
 
+type ttyWriter struct {
+	w io.Writer
+}
+
+func (tw *ttyWriter) Write(p []byte) (int, error) {
+	var buf []byte
+	needsCR := false
+	for _, b := range p {
+		if b == '\n' {
+			if !needsCR {
+				buf = append(buf, '\r', '\n')
+				needsCR = true
+			} else {
+				buf = append(buf, '\n')
+			}
+		} else if b == '\r' {
+			needsCR = true
+			buf = append(buf, '\r')
+		} else {
+			needsCR = false
+			buf = append(buf, b)
+		}
+	}
+	return tw.w.Write(buf)
+}
+
+var _ io.Writer = (*ttyWriter)(nil)
+
 func isTerminalFile(f *os.File) bool {
 	if f == nil {
 		return false

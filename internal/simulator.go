@@ -174,6 +174,7 @@ func executeSimulationCommand(project *Project, options SimulationOptions, input
 }
 
 func simulateWithTTY(project *Project, options SimulationOptions, stdin *os.File, output io.Writer) error {
+	ttyOut := &ttyWriter{w: output}
 	mode, err := newRawTerminalMode()
 	if err != nil {
 		return err
@@ -202,7 +203,7 @@ func simulateWithTTY(project *Project, options SimulationOptions, stdin *os.File
 	}
 	for _, port := range ports {
 		declared[port.Name] = port
-		fmt.Fprint(output, inputPrompt(port))
+		fmt.Fprint(ttyOut, inputPrompt(port))
 		line, err := readTTYLine(byteCh)
 		if err != nil {
 			return err
@@ -223,11 +224,11 @@ func simulateWithTTY(project *Project, options SimulationOptions, stdin *os.File
 		clocks[port.Name] = port
 	}
 	clockStates := initializeClockStates(project.Entry.Clocks)
-	viewer, err = evaluateAndRenderStep(project, options, inputs, viewer, output)
+	viewer, err = evaluateAndRenderStep(project, options, inputs, viewer, ttyOut)
 	if err != nil {
 		return err
 	}
-	printSimulationPrompt(output)
+	printSimulationPrompt(ttyOut)
 
 	var buffer strings.Builder
 	enterRequested := false
@@ -248,8 +249,8 @@ func simulateWithTTY(project *Project, options SimulationOptions, stdin *os.File
 			}
 			if b.b == 27 {
 				setAllClocksManual(clockStates)
-				fmt.Fprint(output, "\n")
-				printSimulationPrompt(output)
+				fmt.Fprint(ttyOut, "\r\n")
+				printSimulationPrompt(ttyOut)
 				continue
 			}
 			if b.b == '\r' || b.b == '\n' {
@@ -259,53 +260,77 @@ func simulateWithTTY(project *Project, options SimulationOptions, stdin *os.File
 				if len(text) > 0 {
 					buffer.Reset()
 					buffer.WriteString(text[:len(text)-1])
-					fmt.Fprint(output, "\b \b")
+					fmt.Fprint(ttyOut, "\b \b")
 				}
 				continue
+			} else if b.b >= 32 && b.b < 127 {
+				buffer.WriteByte(b.b)
+				fmt.Fprintf(ttyOut, "%c", b.b)
 			} else {
 				buffer.WriteByte(b.b)
-				fmt.Fprintf(output, "%c", b.b)
 			}
 
 			if enterRequested {
 				text := strings.TrimSpace(buffer.String())
 				buffer.Reset()
 				enterRequested = false
-				fmt.Fprint(output, "\n")
+				fmt.Fprint(ttyOut, "\r\n")
 				if text == "" {
-					printSimulationPrompt(output)
+					printSimulationPrompt(ttyOut)
 					continue
 				}
 				command, err := parseSimulationCommand(text, declared, clocks, buttonLookup)
 				if err != nil {
-					fmt.Fprintf(output, "%v\n", err)
-					printSimulationPrompt(output)
+					fmt.Fprintf(ttyOut, "%v\r\n", err)
+					printSimulationPrompt(ttyOut)
 					continue
 				}
-				viewer, stop, err = executeSimulationCommand(project, options, inputs, viewer, output, clockStates, buttons, tappedButtons, command)
+				viewer, stop, err = executeSimulationCommand(project, options, inputs, viewer, ttyOut, clockStates, buttons, tappedButtons, command)
 				if err != nil {
-					fmt.Fprintf(output, "%v\n", err)
-					printSimulationPrompt(output)
+					fmt.Fprintf(ttyOut, "%v\r\n", err)
+					printSimulationPrompt(ttyOut)
 					continue
 				}
 				if stop {
 					return nil
 				}
-				printSimulationPrompt(output)
+				printSimulationPrompt(ttyOut)
 			}
 
 		case now := <-timerCh:
 			changed, shouldEnter := advanceAutoClocks(inputs, clockStates, now)
+			if shouldEnter && buffer.Len() > 0 {
+				text := strings.TrimSpace(buffer.String())
+				buffer.Reset()
+				fmt.Fprint(ttyOut, "\r\n")
+				if text == "" {
+					continue
+				}
+				command, err := parseSimulationCommand(text, declared, clocks, buttonLookup)
+				if err != nil {
+					fmt.Fprintf(ttyOut, "%v\r\n", err)
+					printSimulationPrompt(ttyOut)
+					continue
+				}
+				viewer, stop, err = executeSimulationCommand(project, options, inputs, viewer, ttyOut, clockStates, buttons, tappedButtons, command)
+				if err != nil {
+					fmt.Fprintf(ttyOut, "%v\r\n", err)
+					printSimulationPrompt(ttyOut)
+					continue
+				}
+				if stop {
+					return nil
+				}
+				printSimulationPrompt(ttyOut)
+				continue
+			}
 			if changed {
-				viewer, err = evaluateAndRenderStep(project, options, inputs, viewer, output)
+				viewer, err = evaluateAndRenderStep(project, options, inputs, viewer, ttyOut)
 				if err != nil {
 					return err
 				}
 				clearTappedButtons(tappedButtons, project.ButtonState)
-				printSimulationPrompt(output)
-			}
-			if shouldEnter && buffer.Len() > 0 {
-				enterRequested = true
+				printSimulationPrompt(ttyOut)
 			}
 		}
 
@@ -313,27 +338,27 @@ func simulateWithTTY(project *Project, options SimulationOptions, stdin *os.File
 			text := strings.TrimSpace(buffer.String())
 			buffer.Reset()
 			enterRequested = false
-			fmt.Fprint(output, "\n")
+			fmt.Fprint(ttyOut, "\r\n")
 			if text == "" {
-				printSimulationPrompt(output)
+				printSimulationPrompt(ttyOut)
 				continue
 			}
 			command, err := parseSimulationCommand(text, declared, clocks, buttonLookup)
 			if err != nil {
-				fmt.Fprintf(output, "%v\n", err)
-				printSimulationPrompt(output)
+				fmt.Fprintf(ttyOut, "%v\r\n", err)
+				printSimulationPrompt(ttyOut)
 				continue
 			}
-			viewer, stop, err = executeSimulationCommand(project, options, inputs, viewer, output, clockStates, buttons, tappedButtons, command)
+			viewer, stop, err = executeSimulationCommand(project, options, inputs, viewer, ttyOut, clockStates, buttons, tappedButtons, command)
 			if err != nil {
-				fmt.Fprintf(output, "%v\n", err)
-				printSimulationPrompt(output)
+				fmt.Fprintf(ttyOut, "%v\r\n", err)
+				printSimulationPrompt(ttyOut)
 				continue
 			}
 			if stop {
 				return nil
 			}
-			printSimulationPrompt(output)
+			printSimulationPrompt(ttyOut)
 		}
 	}
 }
