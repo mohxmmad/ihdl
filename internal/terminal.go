@@ -1,7 +1,6 @@
 package internal
 
 import (
-	"bytes"
 	"io"
 	"os"
 	"os/exec"
@@ -24,11 +23,15 @@ type terminalMode struct {
 }
 
 func newRawTerminalMode() (*terminalMode, error) {
-	state, err := exec.Command("stty", "-g").Output()
+	cmd := exec.Command("stty", "-g")
+	cmd.Stdin = os.Stdin
+	state, err := cmd.Output()
 	if err != nil {
 		return nil, err
 	}
-	if err := exec.Command("stty", "raw", "-echo").Run(); err != nil {
+	cmd = exec.Command("stty", "raw", "-echo")
+	cmd.Stdin = os.Stdin
+	if err := cmd.Run(); err != nil {
 		return nil, err
 	}
 	return &terminalMode{state: strings.TrimSpace(string(state))}, nil
@@ -38,7 +41,9 @@ func (mode *terminalMode) restore() {
 	if mode == nil || mode.state == "" {
 		return
 	}
-	_ = exec.Command("stty", mode.state).Run()
+	cmd := exec.Command("stty", mode.state)
+	cmd.Stdin = os.Stdin
+	_ = cmd.Run()
 }
 
 type inputByte struct {
@@ -59,8 +64,4 @@ func readBytes(r io.Reader, out chan<- inputByte) {
 			return
 		}
 	}
-}
-
-func appendCommandByte(buf *bytes.Buffer, b byte) {
-	buf.WriteByte(b)
 }
