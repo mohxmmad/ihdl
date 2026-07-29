@@ -1025,6 +1025,9 @@ func parseSimulationCommand(text string, declared map[string]Port, clocks map[st
 	if trimmed == "" {
 		return simulationCommand{}, fmt.Errorf("enter 'set <signal> <value>', 'tap <button>', 'clock <auto|manual|step> ...', 'show', or 'stop'")
 	}
+	if len(trimmed) > 0 && (trimmed[0] == 0x1b || trimmed == "^[") {
+		return simulationCommand{kind: simulationCommandEscape}, nil
+	}
 	fields := strings.Fields(trimmed)
 	if len(fields) == 0 {
 		return simulationCommand{}, fmt.Errorf("enter 'set <signal> <value>', 'tap <button>', 'clock <auto|manual|step> ...', 'show', or 'stop'")
