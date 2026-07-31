@@ -423,10 +423,13 @@ func SimulateFromFilesWithOptions(project *Project, inputPath, outputPath string
 }
 
 func Evaluate(project *Project, circuit *Circuit, inputs map[string]Value) (map[string]Value, error) {
-	return evaluate(project, circuit, inputs, circuit.Name)
+	if err := ensureCompiled(project, circuit); err != nil {
+		return nil, err
+	}
+	return evaluate(project, circuit, inputs, circuit.Name, 0)
 }
 
-func evaluate(project *Project, circuit *Circuit, inputs map[string]Value, scope string) (map[string]Value, error) {
+func evaluate(project *Project, circuit *Circuit, inputs map[string]Value, scope string, stateBase int) (map[string]Value, error) {
 	env := make(map[string]Value)
 	for _, in := range allDeclaredSourcePorts(circuit) {
 		value, ok := inputs[in.Name]
@@ -455,30 +458,23 @@ func evaluate(project *Project, circuit *Circuit, inputs map[string]Value, scope
 		return outputs, nil
 	}
 
-	if project.WireState != nil {
-		if wireValues, ok := project.WireState[scope]; ok {
-			for _, wire := range circuit.Wires {
-				if value, ok := wireValues[wire.Name]; ok {
-					if _, exists := env[wire.Name]; !exists {
-						env[wire.Name] = cloneValue(value)
-					}
-				}
-			}
-		}
-	}
-
-	modulesByName := make(map[string]*Circuit)
-	for _, imported := range project.Circuits {
-		modulesByName[imported.Name] = imported
+	cc := project.comp.modules[circuit.Name]
+	if cc != nil {
+		loadStateInto(project, cc, stateBase, env)
 	}
 
 	pending := append([]Operation(nil), circuit.Ops...)
+	order := make([]int, len(circuit.Ops))
+	for i := range order {
+		order[i] = i
+	}
 	for len(pending) > 0 {
 		progress := false
 		next := make([]Operation, 0, len(pending))
+		nextOrder := make([]int, 0, len(pending))
 
-		for _, op := range pending {
-			applied, err := applyOperation(op, env, circuit, modulesByName, project, scope)
+		for n, op := range pending {
+			applied, err := applyOperation(op, order[n], env, circuit, cc, project, scope, stateBase)
 			if err != nil {
 				return nil, err
 			}
@@ -487,6 +483,7 @@ func evaluate(project *Project, circuit *Circuit, inputs map[string]Value, scope
 				continue
 			}
 			next = append(next, op)
+			nextOrder = append(nextOrder, order[n])
 		}
 
 		if !progress {
@@ -498,6 +495,7 @@ func evaluate(project *Project, circuit *Circuit, inputs map[string]Value, scope
 			break
 		}
 		pending = next
+		order = nextOrder
 	}
 
 	for _, out := range circuit.Outputs {
@@ -508,21 +506,9 @@ func evaluate(project *Project, circuit *Circuit, inputs map[string]Value, scope
 		}
 	}
 
-	if project.WireState == nil {
-		project.WireState = make(map[string]map[string]Value)
-	}
-	if project.WireState[scope] == nil {
-		project.WireState[scope] = make(map[string]Value)
-	}
-	for _, wire := range circuit.Wires {
-		if value, ok := env[wire.Name]; ok && value.Kind != SignalErr {
-			project.WireState[scope][wire.Name] = cloneValue(value)
-		}
-	}
-	for _, out := range circuit.Outputs {
-		if value, ok := env[out.Name]; ok && value.Kind != SignalErr {
-			project.WireState[scope][out.Name] = cloneValue(value)
-		}
+	if cc != nil {
+		saveStateFrom(project, cc, stateBase, env)
+		mirrorEntryWireState(project, circuit, cc, env, scope)
 	}
 
 	outputs := make(map[string]Value, len(circuit.Outputs))
@@ -540,7 +526,36 @@ func evaluate(project *Project, circuit *Circuit, inputs map[string]Value, scope
 	return outputs, nil
 }
 
-func applyOperation(op Operation, env map[string]Value, circuit *Circuit, modules map[string]*Circuit, project *Project, scope string) (bool, error) {
+// mirrorEntryWireState keeps the legacy project.WireState populated for the
+// entry scope so that existing code and tests that inspect WireState keep
+// working. Only the entry scope is mirrored; every deeper instance uses the
+// compact state store instead, which is what eliminates the unbounded memory
+// growth of the old per-instance string-keyed WireState maps.
+func mirrorEntryWireState(project *Project, circuit *Circuit, cc *compiledCircuit, env map[string]Value, scope string) {
+	if scope != circuit.Name {
+		return
+	}
+	if project.WireState == nil {
+		project.WireState = make(map[string]map[string]Value)
+	}
+	ws := project.WireState[scope]
+	if ws == nil {
+		ws = make(map[string]Value)
+		project.WireState[scope] = ws
+	}
+	for _, wire := range circuit.Wires {
+		if value, ok := env[wire.Name]; ok && value.Kind != SignalErr {
+			ws[wire.Name] = cloneValue(value)
+		}
+	}
+	for _, out := range circuit.Outputs {
+		if value, ok := env[out.Name]; ok && value.Kind != SignalErr {
+			ws[out.Name] = cloneValue(value)
+		}
+	}
+}
+
+func applyOperation(op Operation, opIdx int, env map[string]Value, circuit *Circuit, cc *compiledCircuit, project *Project, scope string, stateBase int) (bool, error) {
 	switch op.Kind {
 	case "HIGH", "LOW":
 		port, err := signalPort(circuit, op.Outputs[0])
@@ -850,6 +865,7 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 		return true, nil
 
 	case "USE":
+		modules := project.comp.moduleByName
 		child, ok := modules[op.Module]
 		if !ok {
 			return false, fmt.Errorf("module %s not found for %s", op.Module, circuit.Name)
@@ -888,7 +904,28 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 			}
 			childInputs[in.Name] = cloneValue(converted)
 		}
+		childStateBase := stateBase
+		if cc != nil && opIdx >= 0 && opIdx < len(cc.stateOffs) && cc.stateOffs[opIdx] >= 0 {
+			childStateBase += cc.stateOffs[opIdx]
+		}
+		cacheID := -1
+		if cc != nil && opIdx >= 0 && opIdx < len(cc.stateIDs) {
+			cacheID = cc.stateIDs[opIdx]
+		}
 		if ignored {
+			if cacheID >= 0 {
+				if cached, ok := project.comp.outCache[cacheID]; ok {
+					for i, out := range child.Outputs {
+						parentSignal := op.Signals[len(sources)+i]
+						if i < len(cached) && cacheValueValid(cached[i], out) {
+							env[parentSignal] = cloneValue(cached[i])
+							continue
+						}
+						env[parentSignal] = defaultOutputValue(out)
+					}
+					return true, nil
+				}
+			}
 			childInstance := childScope(scope, op)
 			ws, hasState := project.WireState[childInstance]
 			for i, out := range child.Outputs {
@@ -903,7 +940,7 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 			}
 			return true, nil
 		}
-		childOutputs, err := evaluate(project, child, childInputs, childScope(scope, op))
+		childOutputs, err := evaluate(project, child, childInputs, childScope(scope, op), childStateBase)
 		if err != nil {
 			return false, err
 		}
@@ -915,10 +952,53 @@ func applyOperation(op Operation, env map[string]Value, circuit *Circuit, module
 				return false, err
 			}
 		}
+		if cc != nil && opIdx >= 0 && opIdx < len(cc.skippable) && cc.skippable[opIdx] && cacheID >= 0 {
+			cached := make([]Value, len(child.Outputs))
+			for i := range cached {
+				cached[i] = errValue()
+			}
+			for i, out := range child.Outputs {
+				if value := childOutputs[out.Name]; value.Kind != SignalErr {
+					cached[i] = cloneValue(value)
+				}
+			}
+			project.comp.outCache[cacheID] = cached
+		}
 		return true, nil
 	}
 
 	return false, fmt.Errorf("unknown operation %s in module %s", op.Kind, circuit.Name)
+}
+
+// cacheValueValid reports whether a cached child output may be substituted for
+// the child's declared output port. This guards against a stale or
+// mis-associated cache slot producing a value of the wrong shape.
+func cacheValueValid(value Value, out Port) bool {
+	if value.Kind == SignalErr || value.Kind == SignalIgnore {
+		return false
+	}
+	if value.Kind != out.Kind {
+		return CompatibleKinds(value.Kind, out.Kind)
+	}
+	switch value.Kind {
+	case SignalBits:
+		return len(value.Bits) == out.Width
+	case SignalRGB, SignalBW:
+		return len(value.Channels) == portChannelCount(out.Kind)
+	case SignalGrid:
+		return value.GridW == out.GridW && value.GridH == out.GridH && len(value.Pixels) == out.GridW*out.GridH*3
+	}
+	return true
+}
+
+func portChannelCount(kind SignalKind) int {
+	if kind == SignalRGB {
+		return 3
+	}
+	if kind == SignalBW {
+		return 1
+	}
+	return 0
 }
 
 func childScope(scope string, op Operation) string {
@@ -1548,6 +1628,9 @@ func formatValue(value Value) string {
 }
 
 func allDeclaredSourcePorts(circuit *Circuit) []Port {
+	if circuit.sourcePorts != nil {
+		return circuit.sourcePorts
+	}
 	ports := make([]Port, 0, len(circuit.Inputs)+len(circuit.Clocks))
 	for _, p := range circuit.Inputs {
 		if !isButtonSignal(circuit, p.Name) {
@@ -1555,6 +1638,7 @@ func allDeclaredSourcePorts(circuit *Circuit) []Port {
 		}
 	}
 	ports = append(ports, circuit.Clocks...)
+	circuit.sourcePorts = ports
 	return ports
 }
 

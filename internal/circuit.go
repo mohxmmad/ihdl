@@ -210,6 +210,12 @@ type Circuit struct {
 	Ops      []Operation
 	Imports  []string
 	Signals  map[string]Port
+
+	// sourcePorts caches the result of allDeclaredSourcePorts. It is derived
+	// solely from Inputs/Clocks/Buttons, which never change after parsing, so
+	// caching is safe and avoids rebuilding the slice for every USE op in a
+	// deep hierarchy.
+	sourcePorts []Port
 }
 
 type Project struct {
@@ -221,4 +227,9 @@ type Project struct {
 	WireState   map[string]map[string]Value
 	ButtonState map[string]Value
 	FloatState  map[string]Value
+
+	// comp holds the compact persistent state layout. It is built lazily on
+	// the first evaluation and replaces the unbounded WireState retention for
+	// large hierarchies.
+	comp *compiledProject
 }
