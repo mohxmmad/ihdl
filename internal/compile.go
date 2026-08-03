@@ -292,6 +292,13 @@ func computeCtxCanIgnore(c *Circuit, moduleByName map[string]*Circuit, compiled 
 						break
 					}
 				}
+				for _, out := range op.Signals[n:] {
+					if prod && !can[out] {
+						can[out] = true
+						changed = true
+					}
+				}
+				continue
 			}
 			for _, out := range op.Outputs {
 				if prod && !can[out] {

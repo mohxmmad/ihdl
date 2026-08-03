@@ -932,6 +932,7 @@ func applyOperation(op Operation, opIdx int, env map[string]Value, circuit *Circ
 		}
 		childInputs := make(map[string]Value, len(sources))
 		ignored := false
+		childCC := project.comp.modules[child.Name]
 		for i, in := range sources {
 			parentSignal := op.Signals[i]
 			value, ok := env[parentSignal]
@@ -981,17 +982,35 @@ func applyOperation(op Operation, opIdx int, env map[string]Value, circuit *Circ
 					return true, nil
 				}
 			}
+			restored := make(map[string]Value)
+			if childCC != nil {
+				loadStateInto(project, childCC, childStateBase, restored)
+			}
 			childInstance := childScope(scope, op)
 			ws, hasState := project.WireState[childInstance]
+			cached := make([]Value, len(child.Outputs))
+			haveRealValue := false
 			for i, out := range child.Outputs {
 				parentSignal := op.Signals[len(sources)+i]
+				if value, ok := restored[out.Name]; ok && cacheValueValid(value, out) {
+					env[parentSignal] = cloneValue(value)
+					cached[i] = cloneValue(value)
+					haveRealValue = true
+					continue
+				}
 				if hasState {
 					if value, ok := ws[out.Name]; ok {
 						env[parentSignal] = cloneValue(value)
+						cached[i] = cloneValue(value)
+						haveRealValue = true
 						continue
 					}
 				}
-				env[parentSignal] = defaultOutputValue(out)
+				value := defaultOutputValue(out)
+				env[parentSignal] = value
+			}
+			if cacheID >= 0 && haveRealValue {
+				project.comp.outCache[cacheID] = cached
 			}
 			return true, nil
 		}

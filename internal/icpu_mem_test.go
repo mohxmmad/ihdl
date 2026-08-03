@@ -114,3 +114,83 @@ func TestIcpuRAM32kWriteRead(t *testing.T) {
 		t.Fatalf("word1 should be untouched, got %s", out)
 	}
 }
+
+func TestSkippedUseRestoresStateWithoutCache(t *testing.T) {
+	child := &Circuit{
+		Name:    "Child",
+		Inputs:  []Port{{Name: "IN", Kind: SignalBits, Width: 1}, {Name: "CTRL", Kind: SignalBits, Width: 1}},
+		Outputs: []Port{{Name: "OUT", Kind: SignalBits, Width: 1}},
+		Signals: map[string]Port{
+			"IN":   {Name: "IN", Kind: SignalBits, Width: 1},
+			"CTRL": {Name: "CTRL", Kind: SignalBits, Width: 1},
+			"FB":   {Name: "FB", Kind: SignalBits, Width: 1},
+			"OUT":  {Name: "OUT", Kind: SignalBits, Width: 1},
+		},
+		Ops: []Operation{
+			{Kind: "BUF", Name: "B1", Inputs: []string{"IN"}, Outputs: []string{"FB"}},
+			{Kind: "BUF", Name: "B2", Inputs: []string{"FB"}, Outputs: []string{"OUT"}},
+			{Kind: "BUF", Name: "B3", Inputs: []string{"OUT"}, Outputs: []string{"FB"}},
+		},
+	}
+	parent := &Circuit{
+		Name:    "Parent",
+		Inputs:  []Port{{Name: "A", Kind: SignalBits, Width: 1}},
+		Outputs: []Port{{Name: "OUT", Kind: SignalBits, Width: 1}},
+		Signals: map[string]Port{
+			"A":   {Name: "A", Kind: SignalBits, Width: 1},
+			"X":   {Name: "X", Kind: SignalBits, Width: 1},
+			"OUT": {Name: "OUT", Kind: SignalBits, Width: 1},
+		},
+		Ops: []Operation{
+			{Kind: "IGNORE", Name: "G1", Inputs: []string{"A"}, Outputs: []string{"X"}},
+			{Kind: "USE", Name: "C1", Module: "Child", Signals: []string{"A", "X", "OUT"}},
+		},
+	}
+	proj := &Project{Entry: parent, Circuits: map[string]*Circuit{"Parent": parent, "Child": child}}
+
+	outputs, err := Evaluate(proj, parent, map[string]Value{"A": {Kind: SignalBits, Bits: []bool{true}}})
+	if err != nil {
+		t.Fatalf("evaluate first: %v", err)
+	}
+	if got := formatValue(outputs["OUT"]); got != "1" {
+		t.Fatalf("expected first OUT=1, got %s", got)
+	}
+
+	proj.comp.outCache = make(map[int][]Value)
+
+	outputs, err = Evaluate(proj, parent, map[string]Value{"A": {Kind: SignalBits, Bits: []bool{false}}})
+	if err != nil {
+		t.Fatalf("evaluate second: %v", err)
+	}
+	if got := formatValue(outputs["OUT"]); got != "1" {
+		t.Fatalf("expected skipped child to restore stateful OUT=1 without cache, got %s", got)
+	}
+}
+
+func TestVRAM8SkippableFlags(t *testing.T) {
+	path := "/media/mohammad/4ced7ac4-815e-4531-89de-145a9460e9461/Documents/icpu/cpu/memory/vram8.ihdl"
+	if _, err := os.Stat(path); err != nil {
+		t.Skipf("icpu checkout not present: %v", err)
+	}
+	project, err := ParseProject(path)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := ensureCompiled(project, project.Entry); err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	cc := project.comp.modules[project.Entry.Name]
+	if cc == nil {
+		t.Fatalf("missing compiled entry")
+	}
+	if !cc.ctxCanIgnore["A0"] || !cc.ctxCanIgnore["L0"] {
+		t.Fatalf("expected reset-decoder path to make A0 and L0 skippable")
+	}
+	for i, op := range project.Entry.Ops {
+		if op.Kind == "USE" && op.Module == "REGISTER" {
+			if !cc.skippable[i] {
+				t.Fatalf("REGISTER use %s at op %d is not skippable", op.Name, i)
+			}
+		}
+	}
+}
