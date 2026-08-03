@@ -326,19 +326,9 @@ func loadCircuit(path string, registry map[string]*Circuit, loading map[string]b
 			if len(fields) < 3 {
 				return nil, fmt.Errorf("%s:%d: invalid SPLIT", cleanPath, lineNo+1)
 			}
-			outputWidth := 1
-			if src, ok := circuit.Signals[fields[1]]; ok {
-				if src.Kind == SignalBW {
-					outputWidth = 8
-					if len(fields)-2 != 1 {
-						return nil, fmt.Errorf("%s:%d: SPLIT on BW pixel needs exactly 1 output", cleanPath, lineNo+1)
-					}
-				} else if src.Kind == SignalRGB {
-					outputWidth = 8
-					if len(fields)-2 != 3 {
-						return nil, fmt.Errorf("%s:%d: SPLIT on RGB pixel needs exactly 3 outputs", cleanPath, lineNo+1)
-					}
-				}
+			outputWidth, err := inferSplitOutputWidth(circuit.Signals[fields[1]], fields[2:], circuit.Signals)
+			if err != nil {
+				return nil, fmt.Errorf("%s:%d: %w", cleanPath, lineNo+1, err)
 			}
 			for _, output := range fields[2:] {
 				if err := registerSignal(circuit.Signals, Port{Name: output, Kind: SignalBits, Width: outputWidth}); err != nil {
@@ -352,21 +342,30 @@ func loadCircuit(path string, registry map[string]*Circuit, loading map[string]b
 				return nil, fmt.Errorf("%s:%d: invalid JOIN", cleanPath, lineNo+1)
 			}
 			outputName := fields[len(fields)-1]
-			inputWidth := 1
 			outputPort, outputExists := circuit.Signals[outputName]
 			if outputExists && (outputPort.Kind == SignalBW || outputPort.Kind == SignalRGB) {
-				inputWidth = 8
-			}
-			for _, input := range fields[1 : len(fields)-1] {
-				if err := registerSignal(circuit.Signals, Port{Name: input, Kind: SignalBits, Width: inputWidth}); err != nil {
+				if len(fields)-2 != portChannelCount(outputPort.Kind) {
+					return nil, fmt.Errorf("%s:%d: join to %s pixel needs exactly %d inputs", cleanPath, lineNo+1, outputPort.Kind, portChannelCount(outputPort.Kind))
+				}
+				for _, input := range fields[1 : len(fields)-1] {
+					if err := registerSignal(circuit.Signals, Port{Name: input, Kind: SignalBits, Width: 8}); err != nil {
+						return nil, fmt.Errorf("%s:%d: %w", cleanPath, lineNo+1, err)
+					}
+				}
+			} else {
+				inputPorts, inferredOutputPort, err := inferJoinBitWidths(fields[1:len(fields)-1], circuit.Signals[outputName], circuit.Signals)
+				if err != nil {
 					return nil, fmt.Errorf("%s:%d: %w", cleanPath, lineNo+1, err)
 				}
-			}
-			if !outputExists {
-				output := Port{Name: outputName, Kind: SignalBits, Width: len(fields) - 2}
-				if err := registerSignal(circuit.Signals, output); err != nil {
-					return nil, fmt.Errorf("%s:%d: %w", cleanPath, lineNo+1, err)
+				outputPort = inferredOutputPort
+				for i, input := range fields[1 : len(fields)-1] {
+					if err := registerSignal(circuit.Signals, Port{Name: input, Kind: SignalBits, Width: inputPorts[i]}); err != nil {
+						return nil, fmt.Errorf("%s:%d: %w", cleanPath, lineNo+1, err)
+					}
 				}
+			}
+			if err := registerSignal(circuit.Signals, outputPort); err != nil {
+				return nil, fmt.Errorf("%s:%d: %w", cleanPath, lineNo+1, err)
 			}
 			circuit.Ops = append(circuit.Ops, Operation{Kind: "JOIN", Inputs: append([]string(nil), fields[1:len(fields)-1]...), Outputs: []string{outputName}})
 
@@ -625,6 +624,87 @@ func parseSignalRef(token string, known map[string]Port) (Port, error) {
 		}
 	}
 	return port, nil
+}
+
+func inferSplitOutputWidth(source Port, outputs []string, signals map[string]Port) (int, error) {
+	if len(outputs) == 0 {
+		return 0, fmt.Errorf("split needs at least one output")
+	}
+	if source.Kind == SignalBW || source.Kind == SignalRGB {
+		if len(outputs) != portChannelCount(source.Kind) {
+			return 0, fmt.Errorf("split on %s pixel needs exactly %d outputs", source.Kind, portChannelCount(source.Kind))
+		}
+		return 8, nil
+	}
+	if source.Kind != SignalBits {
+		return 1, nil
+	}
+	declaredWidth := 0
+	for _, output := range outputs {
+		if existing, ok := signals[output]; ok {
+			if existing.Kind != SignalBits {
+				return 0, fmt.Errorf("signal %s type mismatch", output)
+			}
+			if declaredWidth == 0 {
+				declaredWidth = existing.Width
+			} else if existing.Width != declaredWidth {
+				return 0, fmt.Errorf("split outputs must all have the same bit width")
+			}
+		}
+	}
+	if declaredWidth > 0 {
+		if source.Width > 0 && source.Width != declaredWidth*len(outputs) {
+			return 0, fmt.Errorf("split width mismatch: source has %d bits but outputs need %d", source.Width, declaredWidth*len(outputs))
+		}
+		return declaredWidth, nil
+	}
+	if source.Width%len(outputs) != 0 {
+		return 0, fmt.Errorf("split width mismatch: source has %d bits but %d outputs do not divide evenly", source.Width, len(outputs))
+	}
+	return source.Width / len(outputs), nil
+}
+
+func inferJoinBitWidths(inputs []string, output Port, signals map[string]Port) ([]int, Port, error) {
+	widths := make([]int, len(inputs))
+	unknown := make([]int, 0, len(inputs))
+	knownSum := 0
+	for i, input := range inputs {
+		if existing, ok := signals[input]; ok {
+			if existing.Kind != SignalBits {
+				return nil, Port{}, fmt.Errorf("signal %s type mismatch", input)
+			}
+			widths[i] = existing.Width
+			knownSum += existing.Width
+		} else {
+			unknown = append(unknown, i)
+		}
+	}
+	if output.Kind == SignalBits && output.Width > 0 {
+		if len(unknown) == 0 {
+			if knownSum != output.Width {
+				return nil, Port{}, fmt.Errorf("join width mismatch: inputs total %d bits but output has %d", knownSum, output.Width)
+			}
+			return widths, output, nil
+		}
+		remaining := output.Width - knownSum
+		if remaining < 0 || remaining%len(unknown) != 0 {
+			return nil, Port{}, fmt.Errorf("join width mismatch: output has %d bits but inputs do not fit", output.Width)
+		}
+		inferred := remaining / len(unknown)
+		for _, idx := range unknown {
+			widths[idx] = inferred
+		}
+		return widths, output, nil
+	}
+	for _, idx := range unknown {
+		widths[idx] = 1
+	}
+	output.Width = 0
+	for _, width := range widths {
+		output.Width += width
+	}
+	output.Kind = SignalBits
+	return widths, output, nil
 }
 
 func registerSignal(signals map[string]Port, port Port) error {

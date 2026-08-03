@@ -802,11 +802,53 @@ func applyOperation(op Operation, opIdx int, env map[string]Value, circuit *Circ
 		if source.Kind != SignalBits {
 			return false, nil
 		}
-		if len(source.Bits) != len(op.Outputs) {
-			return false, fmt.Errorf("split in module %s expected %d outputs for %s, got %d", circuit.Name, len(source.Bits), op.Inputs[0], len(op.Outputs))
-		}
+		offsets := make([]int, len(op.Outputs))
+		declaredWidth := 0
 		for i, output := range op.Outputs {
-			env[output] = Value{Kind: SignalBits, Bits: []bool{source.Bits[i]}}
+			port, err := signalPort(circuit, output)
+			if err != nil {
+				continue
+			}
+			if port.Kind != SignalBits {
+				return false, fmt.Errorf("split output %s in module %s must be a bit signal", output, circuit.Name)
+			}
+			if declaredWidth == 0 {
+				declaredWidth = port.Width
+			} else if port.Width != declaredWidth {
+				return false, fmt.Errorf("split outputs in module %s must have the same width", circuit.Name)
+			}
+			offsets[i] = port.Width
+		}
+		totalWidth := 0
+		if declaredWidth > 0 {
+			totalWidth = declaredWidth * len(op.Outputs)
+			for i := range offsets {
+				if offsets[i] == 0 {
+					offsets[i] = declaredWidth
+				}
+			}
+		} else {
+			if len(source.Bits)%len(op.Outputs) != 0 {
+				return false, fmt.Errorf("split in module %s expected %d outputs to divide %d source bits", circuit.Name, len(op.Outputs), len(source.Bits))
+			}
+			chunkWidth := len(source.Bits) / len(op.Outputs)
+			totalWidth = len(source.Bits)
+			for i := range offsets {
+				offsets[i] = chunkWidth
+			}
+		}
+		if len(source.Bits) != totalWidth {
+			return false, fmt.Errorf("split in module %s expected %d total output bits for %s, got %d", circuit.Name, totalWidth, op.Inputs[0], len(source.Bits))
+		}
+		offset := 0
+		for i, output := range op.Outputs {
+			width := offsets[i]
+			value := Value{Kind: SignalBits, Bits: append([]bool(nil), source.Bits[offset:offset+width]...)}
+			env[output] = value
+			if err := inferSignalPort(circuit, output, value); err != nil {
+				return false, err
+			}
+			offset += width
 		}
 		return true, nil
 
@@ -842,8 +884,8 @@ func applyOperation(op Operation, opIdx int, env map[string]Value, circuit *Circ
 			}
 			return true, nil
 		}
-		bits := make([]bool, len(op.Inputs))
-		for i, inputName := range op.Inputs {
+		result := make([]bool, 0)
+		for _, inputName := range op.Inputs {
 			input, ok := env[inputName]
 			if !ok {
 				return false, nil
@@ -852,12 +894,25 @@ func applyOperation(op Operation, opIdx int, env map[string]Value, circuit *Circ
 				env[op.Outputs[0]] = ignoreValue()
 				return true, nil
 			}
-			if input.Kind != SignalBits || len(input.Bits) != 1 {
+			port, err := signalPort(circuit, inputName)
+			if err == nil {
+				if port.Kind != SignalBits {
+					return false, fmt.Errorf("join input %s in module %s must be a bit signal", inputName, circuit.Name)
+				}
+				if input.Kind != SignalBits || len(input.Bits) != port.Width {
+					return false, nil
+				}
+			} else {
+				if input.Kind != SignalBits {
+					return false, nil
+				}
+			}
+			if input.Kind != SignalBits {
 				return false, nil
 			}
-			bits[i] = input.Bits[0]
+			result = append(result, input.Bits...)
 		}
-		value := Value{Kind: SignalBits, Bits: bits}
+		value := Value{Kind: SignalBits, Bits: result}
 		env[op.Outputs[0]] = value
 		if err := inferSignalPort(circuit, op.Outputs[0], value); err != nil {
 			return false, err

@@ -306,6 +306,50 @@ func TestEvaluateSplitAndConstants(t *testing.T) {
 	project.Circuits["top"] = project.Entry
 }
 
+func TestParseAndEvaluateSplitBus(t *testing.T) {
+	project, err := ParseProject(filepath.Join("..", "examples", "split_bus.ihdl"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	outputs, err := Evaluate(project, project.Entry, map[string]Value{
+		"BUS": {Kind: SignalBits, Bits: []bool{true, false, true, true, false, false, true, false}},
+	})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if got := formatValue(outputs["A"]); got != "10" {
+		t.Fatalf("expected A=10, got %s", got)
+	}
+	if got := formatValue(outputs["B"]); got != "11" {
+		t.Fatalf("expected B=11, got %s", got)
+	}
+	if got := formatValue(outputs["C"]); got != "00" {
+		t.Fatalf("expected C=00, got %s", got)
+	}
+	if got := formatValue(outputs["D"]); got != "10" {
+		t.Fatalf("expected D=10, got %s", got)
+	}
+}
+
+func TestParseAndEvaluateJoinBus(t *testing.T) {
+	project, err := ParseProject(filepath.Join("..", "examples", "join_bus.ihdl"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	outputs, err := Evaluate(project, project.Entry, map[string]Value{
+		"A": {Kind: SignalBits, Bits: []bool{true, false, true, false, true, false, true, false}},
+		"B": {Kind: SignalBits, Bits: []bool{false, true, false, true, false, true, false, true}},
+	})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if got := formatValue(outputs["OUT"]); got != "1010101001010101" {
+		t.Fatalf("expected OUT=1010101001010101, got %s", got)
+	}
+}
+
 func TestEvaluateJoin(t *testing.T) {
 	project, err := ParseProject(filepath.Join("..", "examples", "join.ihdl"))
 	if err != nil {
