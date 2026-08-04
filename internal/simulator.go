@@ -709,29 +709,37 @@ func applyOperation(op Operation, opIdx int, env map[string]Value, circuit *Circ
 		return true, nil
 
 	case "FLOAT":
-		input, ok := env[op.Inputs[0]]
-		if !ok {
+		input, inputOk := env[op.Inputs[0]]
+		load, loadOk := env[op.Inputs[1]]
+		if !inputOk || !loadOk {
 			return false, nil
+		}
+		if load.Kind == SignalIgnore {
+			env[op.Outputs[0]] = ignoreValue()
+			return true, nil
+		}
+		if load.Kind != SignalBits || len(load.Bits) != 1 {
+			return false, fmt.Errorf("float %s in module %s expects 1-bit load", op.Name, circuit.Name)
 		}
 		if input.Kind == SignalIgnore {
 			env[op.Outputs[0]] = ignoreValue()
 			return true, nil
-		}
-		if input.Kind != SignalBits || len(input.Bits) != 1 {
-			return false, fmt.Errorf("float %s in module %s expects 1-bit input", op.Name, circuit.Name)
 		}
 		if project.FloatState == nil {
 			project.FloatState = make(map[string]Value)
 		}
 		path := childScope(scope, op)
 		stored := false
-		if project.FloatState != nil {
-			if value, ok := project.FloatState[path]; ok && value.Kind == SignalBits && len(value.Bits) == 1 {
-				stored = value.Bits[0]
+		if value, ok := project.FloatState[path]; ok && value.Kind == SignalBits && len(value.Bits) == 1 {
+			stored = value.Bits[0]
+		}
+		if load.Bits[0] {
+			if input.Kind != SignalBits || len(input.Bits) != 1 {
+				return false, fmt.Errorf("float %s in module %s expects 1-bit input", op.Name, circuit.Name)
 			}
+			project.FloatState[path] = Value{Kind: SignalBits, Bits: []bool{input.Bits[0]}}
 		}
 		env[op.Outputs[0]] = Value{Kind: SignalBits, Bits: []bool{stored}}
-		project.FloatState[path] = Value{Kind: SignalBits, Bits: []bool{input.Bits[0]}}
 		if err := inferSignalPort(circuit, op.Outputs[0], env[op.Outputs[0]]); err != nil {
 			return false, err
 		}

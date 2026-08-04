@@ -166,17 +166,20 @@ func TestIgnorePrimitivePropagatesAndStopsModule(t *testing.T) {
 
 	child := &Circuit{
 		Name:    "Child",
-		Inputs:  []Port{{Name: "IN", Kind: SignalBits, Width: 1}},
+		Inputs:  []Port{{Name: "IN", Kind: SignalBits, Width: 1}, {Name: "LOAD", Kind: SignalBits, Width: 1}},
 		Outputs: []Port{{Name: "OUT", Kind: SignalBits, Width: 1}},
-		Signals: map[string]Port{"IN": {Name: "IN", Kind: SignalBits, Width: 1}, "OUT": {Name: "OUT", Kind: SignalBits, Width: 1}},
-		Ops:     []Operation{{Kind: "FLOAT", Name: "F1", Inputs: []string{"IN"}, Outputs: []string{"OUT"}}},
+		Signals: map[string]Port{"IN": {Name: "IN", Kind: SignalBits, Width: 1}, "LOAD": {Name: "LOAD", Kind: SignalBits, Width: 1}, "OUT": {Name: "OUT", Kind: SignalBits, Width: 1}},
+		Ops:     []Operation{{Kind: "FLOAT", Name: "F1", Inputs: []string{"IN", "LOAD"}, Outputs: []string{"OUT"}}},
 	}
 	parent := &Circuit{
 		Name:    "Parent",
 		Inputs:  []Port{{Name: "IN", Kind: SignalBits, Width: 1}},
 		Outputs: []Port{{Name: "OUT", Kind: SignalBits, Width: 1}},
-		Signals: map[string]Port{"IN": {Name: "IN", Kind: SignalBits, Width: 1}, "OUT": {Name: "OUT", Kind: SignalBits, Width: 1}},
-		Ops:     []Operation{{Kind: "USE", Name: "C1", Module: "Child", Signals: []string{"IN", "OUT"}}},
+		Signals: map[string]Port{"IN": {Name: "IN", Kind: SignalBits, Width: 1}, "LOAD": {Name: "LOAD", Kind: SignalBits, Width: 1}, "OUT": {Name: "OUT", Kind: SignalBits, Width: 1}},
+		Ops: []Operation{
+			{Kind: "LOW", Outputs: []string{"LOAD"}},
+			{Kind: "USE", Name: "C1", Module: "Child", Signals: []string{"IN", "LOAD", "OUT"}},
+		},
 	}
 	proj = &Project{Entry: parent, Circuits: map[string]*Circuit{"Parent": parent, "Child": child}, FloatState: map[string]Value{"Parent.C1.F1": {Kind: SignalBits, Bits: []bool{true}}}}
 
@@ -192,14 +195,58 @@ func TestIgnorePrimitivePropagatesAndStopsModule(t *testing.T) {
 	}
 }
 
+func TestFloatingGateLoadSemantics(t *testing.T) {
+	circ := &Circuit{
+		Name:    "Float",
+		Inputs:  []Port{{Name: "IN", Kind: SignalBits, Width: 1}, {Name: "LOAD", Kind: SignalBits, Width: 1}},
+		Outputs: []Port{{Name: "OUT", Kind: SignalBits, Width: 1}},
+		Signals: map[string]Port{"IN": {Name: "IN", Kind: SignalBits, Width: 1}, "LOAD": {Name: "LOAD", Kind: SignalBits, Width: 1}, "OUT": {Name: "OUT", Kind: SignalBits, Width: 1}},
+		Ops:     []Operation{{Kind: "FLOAT", Name: "F1", Inputs: []string{"IN", "LOAD"}, Outputs: []string{"OUT"}}},
+	}
+	proj := &Project{Entry: circ, Circuits: map[string]*Circuit{"Float": circ}, FloatState: make(map[string]Value)}
+
+	step := func(in, load bool, wantOut, wantState string) {
+		outputs, err := Evaluate(proj, circ, map[string]Value{
+			"IN":   {Kind: SignalBits, Bits: []bool{in}},
+			"LOAD": {Kind: SignalBits, Bits: []bool{load}},
+		})
+		if err != nil {
+			t.Fatalf("evaluate: %v", err)
+		}
+		if got := formatValue(outputs["OUT"]); got != wantOut {
+			t.Fatalf("OUT: expected %s, got %s", wantOut, got)
+		}
+		got := "0"
+		if st, ok := proj.FloatState["Float.F1"]; ok && st.Kind == SignalBits && len(st.Bits) == 1 && st.Bits[0] {
+			got = "1"
+		}
+		if got != wantState {
+			t.Fatalf("stored: expected %s, got %s", wantState, got)
+		}
+	}
+
+	// LOAD=0 discards IN; OUT shows last stored value (initial 0).
+	step(false, false, "0", "0")
+	// LOAD=0 with IN=1 still discards it.
+	step(true, false, "0", "0")
+	// LOAD=1 writes IN but OUT still shows the previous (stored) value.
+	step(true, true, "0", "1")
+	// LOAD=0 now reads the newly loaded value.
+	step(false, false, "1", "1")
+	// LOAD=1 rewrites IN; OUT lags one evaluation.
+	step(false, true, "1", "0")
+	step(false, false, "0", "0")
+}
+
 func TestFloatingGatePersistenceAcrossRuns(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "computer.ihdl")
 	data := strings.Join([]string{
 		"MODULE Computer",
 		"INPUT IN",
+		"INPUT LOAD",
 		"OUTPUT OUT",
-		"FLOAT F1 IN OUT",
+		"FLOAT F1 IN LOAD OUT",
 		"",
 	}, "\n")
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
@@ -211,7 +258,7 @@ func TestFloatingGatePersistenceAcrossRuns(t *testing.T) {
 	}
 	inputPath := filepath.Join(dir, "case.iinp")
 	outputPath := filepath.Join(dir, "case.iout")
-	if err := os.WriteFile(inputPath, []byte("IN 1\n"), 0o644); err != nil {
+	if err := os.WriteFile(inputPath, []byte("IN 1\nLOAD 1\n"), 0o644); err != nil {
 		t.Fatalf("write input: %v", err)
 	}
 	if err := SimulateFromFilesWithOptions(project, inputPath, outputPath, SimulationOptions{}); err != nil {
@@ -237,7 +284,7 @@ func TestFloatingGatePersistenceAcrossRuns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reparse: %v", err)
 	}
-	if err := os.WriteFile(inputPath, []byte("IN 0\n"), 0o644); err != nil {
+	if err := os.WriteFile(inputPath, []byte("IN 0\nLOAD 0\n"), 0o644); err != nil {
 		t.Fatalf("rewrite input: %v", err)
 	}
 	if err := SimulateFromFilesWithOptions(project, inputPath, outputPath, SimulationOptions{}); err != nil {
@@ -1251,23 +1298,25 @@ func TestBUFWithPixelInModuleUse(t *testing.T) {
 func TestIgnoreInputSkipsModuleUseAndUsesCachedOutput(t *testing.T) {
 	child := &Circuit{
 		Name:    "Child",
-		Inputs:  []Port{{Name: "IN", Kind: SignalBits, Width: 1}},
+		Inputs:  []Port{{Name: "IN", Kind: SignalBits, Width: 1}, {Name: "LOAD", Kind: SignalBits, Width: 1}},
 		Outputs: []Port{{Name: "OUT", Kind: SignalBits, Width: 1}},
-		Signals: map[string]Port{"IN": {Name: "IN", Kind: SignalBits, Width: 1}, "OUT": {Name: "OUT", Kind: SignalBits, Width: 1}},
-		Ops:     []Operation{{Kind: "FLOAT", Name: "F1", Inputs: []string{"IN"}, Outputs: []string{"OUT"}}},
+		Signals: map[string]Port{"IN": {Name: "IN", Kind: SignalBits, Width: 1}, "LOAD": {Name: "LOAD", Kind: SignalBits, Width: 1}, "OUT": {Name: "OUT", Kind: SignalBits, Width: 1}},
+		Ops:     []Operation{{Kind: "FLOAT", Name: "F1", Inputs: []string{"IN", "LOAD"}, Outputs: []string{"OUT"}}},
 	}
 	parent := &Circuit{
 		Name:    "Parent",
 		Inputs:  []Port{{Name: "IN", Kind: SignalBits, Width: 1}},
 		Outputs: []Port{{Name: "OUT", Kind: SignalBits, Width: 1}},
 		Signals: map[string]Port{
-			"IN":  {Name: "IN", Kind: SignalBits, Width: 1},
-			"X":   {Name: "X", Kind: SignalBits, Width: 1},
-			"OUT": {Name: "OUT", Kind: SignalBits, Width: 1},
+			"IN":   {Name: "IN", Kind: SignalBits, Width: 1},
+			"X":    {Name: "X", Kind: SignalBits, Width: 1},
+			"LOAD": {Name: "LOAD", Kind: SignalBits, Width: 1},
+			"OUT":  {Name: "OUT", Kind: SignalBits, Width: 1},
 		},
 		Ops: []Operation{
 			{Kind: "IGNORE", Name: "G1", Inputs: []string{"IN"}, Outputs: []string{"X"}},
-			{Kind: "USE", Name: "C1", Module: "Child", Signals: []string{"X", "OUT"}},
+			{Kind: "LOW", Outputs: []string{"LOAD"}},
+			{Kind: "USE", Name: "C1", Module: "Child", Signals: []string{"X", "LOAD", "OUT"}},
 		},
 	}
 	proj := &Project{

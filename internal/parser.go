@@ -311,8 +311,8 @@ func loadCircuit(path string, registry map[string]*Circuit, loading map[string]b
 			circuit.Ops = append(circuit.Ops, Operation{Kind: fields[0], Name: fields[1], Inputs: []string{fields[2]}, Outputs: []string{fields[3]}})
 
 		case "FLOAT":
-			if len(fields) != 4 {
-				return nil, fmt.Errorf("%s:%d: invalid FLOAT", cleanPath, lineNo+1)
+			if len(fields) != 5 {
+				return nil, fmt.Errorf("%s:%d: invalid FLOAT, want FLOAT <name> <in> <load> <out>", cleanPath, lineNo+1)
 			}
 			if err := registerSignal(circuit.Signals, Port{Name: fields[2], Kind: SignalBits, Width: 1}); err != nil {
 				return nil, fmt.Errorf("%s:%d: %w", cleanPath, lineNo+1, err)
@@ -320,7 +320,10 @@ func loadCircuit(path string, registry map[string]*Circuit, loading map[string]b
 			if err := registerSignal(circuit.Signals, Port{Name: fields[3], Kind: SignalBits, Width: 1}); err != nil {
 				return nil, fmt.Errorf("%s:%d: %w", cleanPath, lineNo+1, err)
 			}
-			circuit.Ops = append(circuit.Ops, Operation{Kind: "FLOAT", Name: fields[1], Inputs: []string{fields[2]}, Outputs: []string{fields[3]}})
+			if err := registerSignal(circuit.Signals, Port{Name: fields[4], Kind: SignalBits, Width: 1}); err != nil {
+				return nil, fmt.Errorf("%s:%d: %w", cleanPath, lineNo+1, err)
+			}
+			circuit.Ops = append(circuit.Ops, Operation{Kind: "FLOAT", Name: fields[1], Inputs: []string{fields[2], fields[3]}, Outputs: []string{fields[4]}})
 
 		case "SPLIT":
 			if len(fields) < 3 {

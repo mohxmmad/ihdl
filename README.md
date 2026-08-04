@@ -289,14 +289,15 @@ Pressing `Esc` in the terminal UI returns all clocks to manual control.
 Floating gates store one persistent bit between simulator runs.
 
 ```ihdl
-FLOAT F1 IN OUT
+FLOAT F1 IN LOAD OUT
 ```
 
 Rules:
 
-- `FLOAT Name In Out` declares a persistent 1-bit storage element
-- reading `OUT` gives the gate's current stored bit during runtime
-- writing `IN` updates the stored bit during runtime and for the next run
+- `FLOAT Name In Load Out` declares a persistent 1-bit storage element
+- reading `OUT` gives the gate's previously stored bit during runtime
+- when `LOAD` is `0`, `IN` is discarded and the stored bit (and `OUT`) is unchanged
+- when `LOAD` is `1`, `IN` is written into the stored bit, but `OUT` still shows the previous stored bit; the new value appears on `OUT` on the next evaluation
 - floating gate state is saved in a `.state` file beside the top-level `.ihdl` file
 - each floating gate is identified by its full instance path, like `Computer.CPU.MEM.F1`
 
@@ -851,12 +852,13 @@ You can build larger structures like `3x3` grids by composing row or cell module
 MODULE FloatGate
 
 INPUT IN
+INPUT LOAD
 OUTPUT OUT
 
-FLOAT F1 IN OUT
+FLOAT F1 IN LOAD OUT
 ```
 
-The stored bit persists between simulator runs in a `.state` file beside the top-level `.ihdl`.
+`LOAD` gates the write: when `LOAD` is `0`, `IN` is discarded and `OUT` holds the last output; when `LOAD` is `1`, `IN` is written into the stored bit while `OUT` still holds the last output (the new value appears on `OUT` on the next evaluation). The stored bit persists between simulator runs in a `.state` file beside the top-level `.ihdl`.
 
 ### IGNORE gate (execution-state)
 
