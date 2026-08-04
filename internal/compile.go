@@ -270,7 +270,7 @@ func computeCtxCanIgnore(c *Circuit, moduleByName map[string]*Circuit, compiled 
 			switch op.Kind {
 			case "IGNORE":
 				prod = true
-			case "HIGH", "LOW", "PIXEL":
+			case "HIGH", "LOW", "PIXEL", "GRID":
 				prod = false
 			case "AND", "OR", "NOT", "BUF", "FLOAT", "SPLIT", "JOIN":
 				for _, in := range op.Inputs {

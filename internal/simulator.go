@@ -774,6 +774,36 @@ func applyOperation(op Operation, opIdx int, env map[string]Value, circuit *Circ
 		env[targetPort.Name] = grid
 		return true, nil
 
+	case "GRID":
+		source, sourceOk := env[op.Inputs[0]]
+		if !sourceOk {
+			return false, nil
+		}
+		if source.Kind == SignalErr || source.Kind == SignalIgnore {
+			return true, nil
+		}
+		if source.Kind != SignalGrid {
+			return false, fmt.Errorf("grid blit %s in module %s expects a grid source", op.Name, circuit.Name)
+		}
+		targetPort, err := signalPort(circuit, op.Outputs[0])
+		if err != nil {
+			return false, err
+		}
+		if targetPort.Kind != SignalGrid {
+			return false, fmt.Errorf("grid blit target %s in module %s must be a grid", targetPort.Name, circuit.Name)
+		}
+		target := ensureGridValue(env, targetPort)
+		for y := 0; y < source.GridH; y++ {
+			for x := 0; x < source.GridW; x++ {
+				setGridPixel(&target, op.X+x, op.Y+y, gridPixelAt(source, x, y))
+			}
+		}
+		env[targetPort.Name] = target
+		if err := inferSignalPort(circuit, op.Outputs[0], target); err != nil {
+			return false, err
+		}
+		return true, nil
+
 	case "SPLIT":
 		source, ok := env[op.Inputs[0]]
 		if !ok {

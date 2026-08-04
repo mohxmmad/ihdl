@@ -1073,6 +1073,111 @@ func TestGridCanBePlacedIntoDisplay(t *testing.T) {
 	}
 }
 
+func TestGridCanBeBlittedIntoAnotherGridHierarchically(t *testing.T) {
+	dir := t.TempDir()
+	tilePath := filepath.Join(dir, "tile.ihdl")
+	quarterPath := filepath.Join(dir, "quarter.ihdl")
+	mainPath := filepath.Join(dir, "main.ihdl")
+
+	tile := strings.Join([]string{
+		"MODULE Tile",
+		"INPUT_RGB P0",
+		"OUTPUT_GRID T 2 2",
+		"PIXEL T 0 0 P0",
+		"PIXEL T 1 1 P0",
+		"",
+	}, "\n")
+	quarter := strings.Join([]string{
+		"MODULE Quarter",
+		"IMPORT Tile",
+		"INPUT_RGB P0",
+		"WIRE_GRID T1 2 2",
+		"WIRE_GRID T2 2 2",
+		"Tile Q1 P0 T1",
+		"Tile Q2 P0 T2",
+		"OUTPUT_GRID OUT 4 2",
+		"GRID T1 OUT 0 0",
+		"GRID T2 OUT 2 0",
+		"",
+	}, "\n")
+	main := strings.Join([]string{
+		"MODULE Main",
+		"IMPORT Quarter",
+		"INPUT_RGB P0",
+		"WIRE_GRID Q1 4 2",
+		"WIRE_GRID Q2 4 2",
+		"Quarter A1 P0 Q1",
+		"Quarter A2 P0 Q2",
+		"OUTPUT_GRID OUT 8 2",
+		"GRID Q1 OUT 0 0",
+		"GRID Q2 OUT 4 0",
+		"",
+	}, "\n")
+	if err := os.WriteFile(tilePath, []byte(tile), 0o644); err != nil {
+		t.Fatalf("write tile: %v", err)
+	}
+	if err := os.WriteFile(quarterPath, []byte(quarter), 0o644); err != nil {
+		t.Fatalf("write quarter: %v", err)
+	}
+	if err := os.WriteFile(mainPath, []byte(main), 0o644); err != nil {
+		t.Fatalf("write main: %v", err)
+	}
+
+	project, err := ParseProject(mainPath)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	outputs, err := Evaluate(project, project.Entry, map[string]Value{"P0": {Kind: SignalRGB, Channels: []uint8{9, 8, 7}}})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	out := outputs["OUT"]
+	if out.Kind != SignalGrid || out.GridW != 8 || out.GridH != 2 {
+		t.Fatalf("expected 8x2 grid output, got %+v", out)
+	}
+	check := func(x, y int, want uint8) {
+		idx := (y*out.GridW + x) * 3
+		if out.Pixels[idx] != want || out.Pixels[idx+1] != want-1 || out.Pixels[idx+2] != want-2 {
+			t.Fatalf("pixel (%d,%d): expected r=%d g=%d b=%d, got %v", x, y, want, want-1, want-2, out.Pixels[idx:idx+3])
+		}
+	}
+	blank := func(x, y int) {
+		idx := (y*out.GridW + x) * 3
+		if out.Pixels[idx] != 0 || out.Pixels[idx+1] != 0 || out.Pixels[idx+2] != 0 {
+			t.Fatalf("pixel (%d,%d): expected black, got %v", x, y, out.Pixels[idx:idx+3])
+		}
+	}
+	check(0, 0, 9)
+	check(2, 0, 9)
+	check(1, 1, 9)
+	check(3, 1, 9)
+	check(4, 0, 9)
+	check(6, 0, 9)
+	check(5, 1, 9)
+	check(7, 1, 9)
+	blank(0, 1)
+	blank(4, 1)
+}
+
+func TestGridBlitIntoTooSmallGridIsRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bad.ihdl")
+	data := strings.Join([]string{
+		"MODULE Bad",
+		"INPUT_RGB P0",
+		"OUTPUT_GRID SUB 2 2",
+		"PIXEL SUB 0 0 P0",
+		"OUTPUT_GRID OUT 1 1",
+		"GRID SUB OUT 0 0",
+		"",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write module: %v", err)
+	}
+	if _, err := ParseProject(path); err == nil {
+		t.Fatalf("expected parse error for grid blit exceeding target bounds")
+	}
+}
+
 func TestButtonTapSetsThenAutoClearsEightBitSignal(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "buttons.ihdl")
 	data := strings.Join([]string{

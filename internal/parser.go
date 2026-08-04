@@ -256,10 +256,6 @@ func loadCircuit(path string, registry map[string]*Circuit, loading map[string]b
 			if !ok || gridPort.Kind != SignalGrid {
 				return nil, fmt.Errorf("%s:%d: unknown grid %s", cleanPath, lineNo+1, fields[1])
 			}
-			displayPos, ok := displayIndex[fields[2]]
-			if !ok {
-				return nil, fmt.Errorf("%s:%d: unknown display %s", cleanPath, lineNo+1, fields[2])
-			}
 			x, y := 0, 0
 			if len(fields) == 5 {
 				x, err = strconv.Atoi(fields[3])
@@ -271,16 +267,32 @@ func loadCircuit(path string, registry map[string]*Circuit, loading map[string]b
 					return nil, fmt.Errorf("%s:%d: invalid grid y coordinate %q", cleanPath, lineNo+1, fields[4])
 				}
 			}
-			display := &circuit.Displays[displayPos]
-			if x+gridPort.GridW > display.Width || y+gridPort.GridH > display.Height {
-				return nil, fmt.Errorf("%s:%d: grid %s at (%d,%d) exceeds display %s bounds %dx%d", cleanPath, lineNo+1, gridPort.Name, x, y, display.Name, display.Width, display.Height)
+			if displayPos, ok := displayIndex[fields[2]]; ok {
+				display := &circuit.Displays[displayPos]
+				if x+gridPort.GridW > display.Width || y+gridPort.GridH > display.Height {
+					return nil, fmt.Errorf("%s:%d: grid %s at (%d,%d) exceeds display %s bounds %dx%d", cleanPath, lineNo+1, gridPort.Name, x, y, display.Name, display.Width, display.Height)
+				}
+				for _, placement := range display.Grids {
+					if placement.GridName == gridPort.Name && placement.X == x && placement.Y == y {
+						return nil, fmt.Errorf("%s:%d: duplicate grid placement for %s on %s at (%d,%d)", cleanPath, lineNo+1, gridPort.Name, display.Name, x, y)
+					}
+				}
+				display.Grids = append(display.Grids, DisplayGrid{GridName: gridPort.Name, X: x, Y: y})
+				continue
 			}
-			for _, placement := range display.Grids {
-				if placement.GridName == gridPort.Name && placement.X == x && placement.Y == y {
-					return nil, fmt.Errorf("%s:%d: duplicate grid placement for %s on %s at (%d,%d)", cleanPath, lineNo+1, gridPort.Name, display.Name, x, y)
+			targetPort, ok := circuit.Signals[fields[2]]
+			if !ok || targetPort.Kind != SignalGrid {
+				return nil, fmt.Errorf("%s:%d: unknown display or grid %s", cleanPath, lineNo+1, fields[2])
+			}
+			if x+gridPort.GridW > targetPort.GridW || y+gridPort.GridH > targetPort.GridH {
+				return nil, fmt.Errorf("%s:%d: grid %s at (%d,%d) exceeds grid %s bounds %dx%d", cleanPath, lineNo+1, gridPort.Name, x, y, targetPort.Name, targetPort.GridW, targetPort.GridH)
+			}
+			for _, op := range circuit.Ops {
+				if op.Kind == "GRID" && op.Outputs[0] == targetPort.Name && op.Inputs[0] == gridPort.Name && op.X == x && op.Y == y {
+					return nil, fmt.Errorf("%s:%d: duplicate grid blit of %s into %s at (%d,%d)", cleanPath, lineNo+1, gridPort.Name, targetPort.Name, x, y)
 				}
 			}
-			display.Grids = append(display.Grids, DisplayGrid{GridName: gridPort.Name, X: x, Y: y})
+			circuit.Ops = append(circuit.Ops, Operation{Kind: "GRID", Inputs: []string{gridPort.Name}, Outputs: []string{targetPort.Name}, X: x, Y: y})
 
 		case "HIGH", "LOW":
 			if len(fields) != 2 {

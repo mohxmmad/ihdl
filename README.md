@@ -184,6 +184,33 @@ Rules:
 - `GRID GridName DisplayName X Y` places the grid at the given offset
 - the placed grid must fit completely inside the display
 
+### Blitting a grid into another grid
+
+`GRID` can also target a grid signal, so sub-grids can be composed into a
+larger grid that is still passed up through the module hierarchy (instead of
+being flattened into a display).
+
+```ihdl
+MODULE Quarter
+
+IMPORT Tile
+INPUT_RGB P0
+WIRE_GRID T1 2 2
+WIRE_GRID T2 2 2
+Tile Q1 P0 T1
+Tile Q2 P0 T2
+
+OUTPUT_GRID OUT 4 2
+GRID T1 OUT 0 0
+GRID T2 OUT 2 0
+```
+
+Rules:
+
+- `GRID GridName TargetGridName X Y` blits the source grid into the target grid at the given offset
+- the source grid must fit completely inside the target grid
+- `GRID` into a display target behaves exactly as described above
+
 ## 5. Clock
 
 Clock is declared separately:
